@@ -243,6 +243,8 @@ function extractProgressItemsByQuestion(rows, headers, analysis) {
   rows.forEach(function(row) {
     var store = idxStore !== -1 ? String(row[idxStore] || '').trim() : '';
     if (!store) return;
+    // ヘッダー行・テンプレート行をスキップ（シート末尾の見本行対策）
+    if (store === '店舗名' || store === '店舗' || store === '店名') return;
 
     // 月フィルタ（Date・「5月」「３月」全角数字・「5/1」「2025/5/1」いずれも対応）
     if (analysis.monthFilter !== null && idxMonth !== -1) {
@@ -435,6 +437,58 @@ function handleProgressQuestionRequest(event, messageText) {
 }
 
 // ==========================================
+// 毎朝9時：善波グループ向け 進捗管理表ダイジェスト
+// 「今月＋翌月の施工分」で「まだ完了していない項目」を一覧にする。
+// 進捗管理表には日次の予定日が無い（依頼日のみ実日付・他はテキスト）ため、
+// 「翌日分」は施工月（今月＋翌月）の未完了で近似する。
+// ==========================================
+function buildSenbaProgressDigest() {
+  var sheet = getProgressSheet();
+  if (!sheet || sheet.getLastRow() < 2) return null;
+
+  var data         = sheet.getDataRange().getValues();
+  var headerRowIdx = findHeaderRowIndex(sheet);
+  var headers      = data[headerRowIdx].map(function(h){ return String(h == null ? '' : h).trim(); });
+  var rows         = data.slice(headerRowIdx + 1);
+
+  var now    = new Date();
+  var curM   = now.getMonth() + 1;
+  var nextM  = now.getMonth() === 11 ? 1 : curM + 1;
+  var months = [curM, nextM];
+
+  // 月ごとに未完了抽出（既存の抽出ロジックを再利用）
+  var results = [];
+  months.forEach(function(m) {
+    var analysis = {
+      targetColumns: [], monthFilter: m, storeFilter: null,
+      assigneeFilter: null, statusFilter: null, mode: 'all',
+    };
+    extractProgressItemsByQuestion(rows, headers, analysis).forEach(function(it) {
+      results.push(it);
+    });
+  });
+
+  if (!results.length) return null;
+
+  var lines = ['●進捗管理表 未完了（' + curM + '月・' + nextM + '月 施工分）'];
+  var MAX = 40;
+  results.slice(0, MAX).forEach(function(it) {
+    lines.push('');
+    var head = '■ ' + it.store;
+    if (it.month)    head += '（' + it.month + (it.kubun ? '・' + it.kubun : '') + '）';
+    else if (it.kubun) head += '（' + it.kubun + '）';
+    lines.push(head);
+    if (it.assignee) lines.push('担当：' + it.assignee);
+    it.pending.forEach(function(p) { lines.push('・' + p.column + '：' + p.value); });
+  });
+  if (results.length > MAX) {
+    var rest = results.slice(MAX).map(function(it){ return it.store; }).join('、');
+    lines.push('\n…ほか ' + (results.length - MAX) + ' 件：' + rest);
+  }
+  return lines.join('\n');
+}
+
+// ==========================================
 // テスト
 // ==========================================
 function testProgressQuestion() {
@@ -511,6 +565,90 @@ function diagnoseProgressSheet() {
       return c;
     })));
   }
+}
+
+// 1つのスプレッドシートの全タブ＋中身プレビューをログ出力する内部ヘルパー
+function dumpOneSpreadsheet_(ss, labelPrefix) {
+  var sheets = ss.getSheets();
+  console.log('\n========================================');
+  console.log('=== ' + labelPrefix + ': ' + ss.getName() + ' / タブ数: ' + sheets.length + ' ===');
+  console.log('タブ一覧: ' + sheets.map(function(s){ return s.getName(); }).join(' | '));
+
+  var PREVIEW_ROWS = 20;
+  var PREVIEW_COLS = 14;
+
+  sheets.forEach(function(sh) {
+    var lastRow = sh.getLastRow();
+    var lastCol = sh.getLastColumn();
+    console.log('\n----- タブ「' + sh.getName() + '」 行数:' + lastRow + ' 列数:' + lastCol + ' -----');
+    if (lastRow < 1 || lastCol < 1) { console.log('（空タブ）'); return; }
+
+    var rows = Math.min(PREVIEW_ROWS, lastRow);
+    var cols = Math.min(PREVIEW_COLS, lastCol);
+    var data = sh.getRange(1, 1, rows, cols).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var cells = data[i].map(function(c) {
+        if (c == null || c === '') return '';
+        if (c instanceof Date) return Utilities.formatDate(c, 'Asia/Tokyo', 'yyyy/M/d HH:mm');
+        return String(c).replace(/\n/g, '⏎');
+      });
+      console.log('R' + (i + 1) + ': ' + JSON.stringify(cells));
+    }
+    if (lastRow > rows) console.log('… ほか ' + (lastRow - rows) + ' 行省略');
+  });
+}
+
+// 診断：進捗管理表の「全列・全行」をダンプする。
+// 「翌日でまだできてない部分」をどの日付列で判定するか決めるために、
+// 納品日時・完工日などが実際にどんな値（Date か 自由テキストか）かを全行確認する。
+// GASエディタで dumpProgressSheetFull を実行 → 実行ログを共有してください。
+function dumpProgressSheetFull() {
+  var sh = getProgressSheet();
+  if (!sh) { console.error('進捗管理表シートに接続できません'); return; }
+  var lastRow = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+  console.log('=== 進捗管理表 全ダンプ:', sh.getParent().getName(), '/', sh.getName(), '/ 行:', lastRow, '列:', lastCol, '===');
+
+  var data = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var cells = data[i].map(function(c) {
+      if (c == null || c === '') return '';
+      if (c instanceof Date) return '[D]' + Utilities.formatDate(c, 'Asia/Tokyo', 'yyyy/M/d HH:mm');
+      return String(c).replace(/\n/g, '⏎');
+    });
+    console.log('R' + (i + 1) + ': ' + JSON.stringify(cells));
+  }
+  console.log('=== ここまで（[D]=Date値, それ以外はテキスト）。全部コピーして共有してください ===');
+}
+
+// 診断：進捗管理スプレッドシート内の「全タブ」と各タブの中身プレビューを出力する。
+// 「いつも送ってる予定メッセージ」がどのタブ・どの範囲にあるかを特定するために使う。
+// GASエディタからこの関数を1回実行し、実行ログ（表示 → 実行ログ）を全部コピーして共有してください。
+function dumpScheduleSpreadsheet() {
+  var props = PropertiesService.getScriptProperties();
+
+  // ① 進捗管理スプレッドシート
+  var extId = props.getProperty('PROGRESS_SPREADSHEET_ID')
+            || '1zzA2qSoKZoTBp81BvH4Vl36TdJUuy1F4prjzcKUX-uE';
+  try {
+    dumpOneSpreadsheet_(SpreadsheetApp.openById(extId), '進捗管理スプレッドシート');
+  } catch (err) {
+    console.error('進捗管理スプレッドシートを開けませんでした:', err.message);
+  }
+
+  // ② メインスプレッドシート（スケジュール管理・タスク管理などがある方）
+  var mainId = props.getProperty('SPREADSHEET_ID');
+  if (mainId && mainId !== extId) {
+    try {
+      dumpOneSpreadsheet_(SpreadsheetApp.openById(mainId), 'メインスプレッドシート');
+    } catch (err) {
+      console.error('メインスプレッドシートを開けませんでした:', err.message);
+    }
+  } else if (!mainId) {
+    console.log('\n（SPREADSHEET_ID 未設定のためメインスプレッドシートはスキップ）');
+  }
+
+  console.log('\n=== ここまで。このログを全部コピーして共有してください ===');
 }
 
 // ヘッダー行のインデックスを自動推定（「店舗名」または「図面チェック」を含む最初の行）

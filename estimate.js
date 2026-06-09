@@ -209,8 +209,16 @@ function getEstimateRateSettings() {
 function isEstimateCreateRequest(text) {
   if (!text) return false;
   // 「見積作って／作成」「見積書作って／作成」など
-  return /見積(書)?(を)?(作って|作成|作っといて|つくって|お願い)/.test(text) ||
-         (/見積(書)?/.test(text) && /(作って|作成|つくって|お願い)/.test(text));
+  if (/見積(書)?(を)?(作って|作成|作っといて|つくって|お願い)/.test(text)) return true;
+  if (/見積(書)?/.test(text) && /(作って|作成|つくって|お願い)/.test(text)) return true;
+  // 「見積書 上書き／再作成／更新」など（上書きモードの短縮表現）
+  if (/見積(書)?/.test(text) && /(上書き|再作成|作り直し|やり直し|更新)/.test(text)) return true;
+  return false;
+}
+
+function isEstimateOverwriteRequest(text) {
+  if (!text) return false;
+  return /上書き|上書きして|再作成|作り直し|やり直し/.test(text);
 }
 
 // メッセージから設定を検索
@@ -391,6 +399,39 @@ function getEstimateRate(settingId, category, drawingName, rateSettings) {
 //   新規: 数量=枚数      / 単位=枚 / 単価=空欄    / 金額=製図時間×unitPrice
 var HOURLY_RATE = 5000; // フォールバックデフォルト
 
+// 同じ図面名＋分類の行を統合する（複数日の同一作業を1行にまとめる）
+// 統合した場合は _mergedCount に件数をセットし、名称に ×N を付加できるようにする
+function mergeRowsByDrawing(rows) {
+  var map = {};
+  var order = [];
+  rows.forEach(function(r) {
+    var key = (r.drawingName || '') + '\0' + (r.category || '');
+    if (!map[key]) {
+      map[key] = { rows: [], totalTime: 0, totalCount: 0 };
+      order.push(key);
+    }
+    map[key].rows.push(r);
+    map[key].totalTime  += (r.time  || 0);
+    map[key].totalCount += (r.count || 0);
+  });
+
+  var merged = [];
+  order.forEach(function(key) {
+    var g = map[key];
+    if (g.rows.length === 1) {
+      merged.push(g.rows[0]);
+      return;
+    }
+    var base = {};
+    for (var k in g.rows[0]) base[k] = g.rows[0][k];
+    base.time          = g.totalTime;
+    base.count         = g.totalCount;
+    base._mergedCount  = g.rows.length;
+    merged.push(base);
+  });
+  return merged;
+}
+
 function calculateEstimateData(groups, setting) {
   var hourlyRate = (setting && setting.unitPrice) || HOURLY_RATE;
   var settingId  = setting && setting.settingId;
@@ -404,9 +445,11 @@ function calculateEstimateData(groups, setting) {
     var fixHours    = 0;
     var detailItems = [];
 
-    g.rows.forEach(function(r){
-      var detail = { name: '', qty: '', unit: '', unitPrice: '', amount: 0 };
+    var mergedRows = mergeRowsByDrawing(g.rows);
+    mergedRows.forEach(function(r){
+      var detail  = { name: '', qty: '', unit: '', unitPrice: '', amount: 0 };
       var confirm = '';
+      var suffix  = r._mergedCount > 1 ? ' ×' + r._mergedCount : '';
 
       if (!r.category) {
         confirm = '分類が空欄';
@@ -414,9 +457,9 @@ function calculateEstimateData(groups, setting) {
       } else if (r.category === '修正') {
         if (!r.time) {
           confirm = '製図時間が空欄';
-          detail.name = (r.drawingName || '') + ' 修正';
+          detail.name = (r.drawingName || '') + ' 修正' + suffix;
         } else {
-          detail.name      = (r.drawingName || '') + ' 修正';
+          detail.name      = (r.drawingName || '') + ' 修正' + suffix;
           detail.qty       = r.time;
           detail.unit      = 'H';
           // 時間が1Hのときは単価欄を表示しない（数量=金額になるため重複表示を避ける）
@@ -427,11 +470,11 @@ function calculateEstimateData(groups, setting) {
       } else if (r.category === '新規') {
         if (!r.time) {
           confirm = '製図時間が空欄（金額計算不可）';
-          detail.name = (r.drawingName || '') + ' 新規';
+          detail.name = (r.drawingName || '') + ' 新規' + suffix;
           detail.qty  = r.count || '';
           detail.unit = '枚';
         } else {
-          detail.name      = (r.drawingName || '') + ' 新規';
+          detail.name      = (r.drawingName || '') + ' 新規' + suffix;
           detail.qty       = r.count || '';
           detail.unit      = '枚';
           detail.unitPrice = ''; // 新規は単価欄空欄（仕様）
@@ -440,12 +483,12 @@ function calculateEstimateData(groups, setting) {
         }
       } else if (r.category === '検討のみ' || r.category === 'WBF') {
         confirm = r.category + '：請求対象不明';
-        detail.name = (r.drawingName || '') + ' ' + r.category;
+        detail.name = (r.drawingName || '') + ' ' + r.category + suffix;
         detail.qty  = r.count || r.time || '';
         detail.unit = r.count ? '枚' : (r.time ? 'H' : '');
       } else {
         confirm = '未対応の分類「' + r.category + '」';
-        detail.name = (r.drawingName || '') + ' ' + r.category;
+        detail.name = (r.drawingName || '') + ' ' + r.category + suffix;
       }
 
       if (confirm) {
@@ -498,10 +541,14 @@ function calculateEstimateData(groups, setting) {
 // SECTION: シート操作
 // ==========================================
 
-function copyEstimateTemplateSheet(estimateSpreadsheetId, templateSheetName, newSheetName) {
+function copyEstimateTemplateSheet(estimateSpreadsheetId, templateSheetName, newSheetName, overwrite) {
   var ss = SpreadsheetApp.openById(estimateSpreadsheetId);
-  if (ss.getSheetByName(newSheetName)) {
-    return { existing: true, ss: ss, sheet: ss.getSheetByName(newSheetName) };
+  var existing = ss.getSheetByName(newSheetName);
+  if (existing) {
+    if (!overwrite) {
+      return { existing: true, ss: ss, sheet: existing };
+    }
+    ss.deleteSheet(existing);
   }
   var tpl = ss.getSheetByName(templateSheetName);
   if (!tpl) throw new Error('テンプレートシート「' + templateSheetName + '」が見つかりません');
@@ -524,7 +571,13 @@ function findCellByText(sheet, searchText) {
   return null;
 }
 
-function writeEstimateCover(targetSheet, estimateData, setting) {
+function writeEstimateCover(targetSheet, estimateData, setting, year, month) {
+  // J3: 作成日（今日の日付 yyyy/MM/dd）
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  targetSheet.getRange('J3').setValue(Utilities.formatDate(new Date(), tz, 'yyyy/MM/dd'));
+  // A5: 対象月（例: 5月）
+  if (month) targetSheet.getRange('A5').setValue(month);
+
   var startRow = COVER_ITEM_START_ROW;
   estimateData.properties.forEach(function(p, i){
     if (i >= COVER_MAX_ROWS) return;
@@ -558,14 +611,13 @@ function writeEstimateDetails(targetSheet, estimateData, setting) {
   estimateData.properties.forEach(function(p, pIdx){
     if (rowState.overflow) return;
     // 物件見出し
-    targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setValue((pIdx + 1) + '　' + p.property);
-    targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setFontWeight('bold');
+    targetSheet.getRange(rowState.row, DETAIL_COL_NO).setValue(pIdx + 1);
+    targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setValue(p.property);
     advance();
     var seqInProperty = 0;
     p.detailItems.forEach(function(d){
       if (rowState.overflow) return;
       seqInProperty++;
-      targetSheet.getRange(rowState.row, DETAIL_COL_NO).setValue(seqInProperty);
       targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setValue(d.name);
       targetSheet.getRange(rowState.row, DETAIL_COL_QTY).setValue(d.qty === '' ? '' : d.qty);
       targetSheet.getRange(rowState.row, DETAIL_COL_UNIT).setValue(d.unit || '');
@@ -606,7 +658,7 @@ function writeEstimateConfirmItems(confirmItems, targetSheetName) {
 
 // 設定 + 年月から見積書を作成する共通処理（LINE非依存）
 //   戻り値: { kind: 'success'|'exists'|'noData', sheetName, spreadsheetUrl, data, year, month, setting }
-function createEstimateFromProcessSheet(setting, year, month) {
+function createEstimateFromProcessSheet(setting, year, month, overwrite) {
   // 必須フィールド検証
   var missing = [];
   if (!setting.processSpreadsheetId)  missing.push('工程管理表ID');
@@ -619,14 +671,14 @@ function createEstimateFromProcessSheet(setting, year, month) {
 
   var sheetName = buildEstimateSheetName(year, month);
 
-  // 既存チェック（上書き禁止）
+  // 既存チェック（上書きモードでない場合のみ中止）
   var preCheckSs;
   try {
     preCheckSs = SpreadsheetApp.openById(setting.estimateSpreadsheetId);
   } catch (e) {
     return { kind: 'openError', setting: setting, target: '見積書', id: setting.estimateSpreadsheetId, message: e.message };
   }
-  if (preCheckSs.getSheetByName(sheetName)) {
+  if (!overwrite && preCheckSs.getSheetByName(sheetName)) {
     return { kind: 'exists', sheetName: sheetName, spreadsheetUrl: preCheckSs.getUrl(), setting: setting };
   }
 
@@ -645,10 +697,10 @@ function createEstimateFromProcessSheet(setting, year, month) {
   var groups = groupRowsByProperty(targetRows);
   var data   = calculateEstimateData(groups, setting);
 
-  var copyRes = copyEstimateTemplateSheet(setting.estimateSpreadsheetId, setting.templateSheetName, sheetName);
+  var copyRes = copyEstimateTemplateSheet(setting.estimateSpreadsheetId, setting.templateSheetName, sheetName, overwrite);
   var target  = copyRes.sheet;
 
-  writeEstimateCover(target, data, setting);
+  writeEstimateCover(target, data, setting, year, month);
   writeEstimateDetails(target, data, setting);
   writeEstimateTotals(target, data);
   writeEstimateConfirmItems(data.confirmItems, sheetName);
@@ -690,7 +742,8 @@ function handleEstimateCreateRequest(event, messageText) {
       return true;
     }
 
-    var result = createEstimateFromProcessSheet(setting, ym.year, ym.month);
+    var overwrite = isEstimateOverwriteRequest(messageText);
+    var result = createEstimateFromProcessSheet(setting, ym.year, ym.month, overwrite);
     if (result.kind === 'configError') {
       sendLineReply(event.replyToken, '⚠️ 設定「' + setting.displayName + '（' + setting.settingId + '）」に必須項目が未設定です：\n・' + result.missing.join('\n・') + '\n\n「見積連携設定」シートを確認してください。');
       return true;
@@ -700,7 +753,7 @@ function handleEstimateCreateRequest(event, messageText) {
       return true;
     }
     if (result.kind === 'exists') {
-      sendLineReply(event.replyToken, '⚠️ 既に「' + result.sheetName + '」の見積書シートがあります。\n上書きしないため処理を中止しました。\n\n見積書：' + result.spreadsheetUrl);
+      sendLineReply(event.replyToken, '⚠️ 既に「' + result.sheetName + '」の見積書シートがあります。\n\n上書きする場合は「上書き」を含めて再送してください。\n例：「' + setting.displayName + ' ' + ym.month + '月分の見積書を上書きして作って」\n\n見積書：' + result.spreadsheetUrl);
       return true;
     }
     if (result.kind === 'noData') {
