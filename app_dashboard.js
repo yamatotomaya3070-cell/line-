@@ -72,6 +72,7 @@ function appGetData() {
       paymentStatus:  String(r['入金ステータス'] || ''),
       note:           String(r['備考'] || ''),
       driveUrl:       String(r['DriveフォルダURL'] || ''),
+      driveStatus:    String(r['Drive同期ステータス'] || (r['DriveフォルダURL'] ? 'ready' : 'missing')),
     });
   });
   // statusMaster: フェーズ→サブステータス候補（カードのドロップダウン用）
@@ -231,6 +232,19 @@ function appGetDriveUrl(projectId) {
   }
 }
 
+// 管理者向け：未作成または失敗した案件だけを、既存の共通Driveサービスで再実行する。
+function appCreateDriveFolder(projectId, who) {
+  if (!projectId) return { ok: false, msg: '引数不足' };
+  var locked = pmWithLock(function() {
+    var proj = pmGetProjectById(projectId);
+    if (!proj) return { ok: false, msg: '案件が見つかりません' };
+    var result = pmEnsureProjectFolder(projectId, proj['案件名'], { source: 'progress-board-retry', actor: appActor_(who) });
+    return result.ok ? { ok: true, url: result.url } : { ok: false, msg: 'Drive作成エラー' };
+  }, 30000);
+  if (!locked.ok) return { ok: false, msg: 'Drive作成が混み合っています。再度お試しください' };
+  return locked.result;
+}
+
 // 取り消し（物理削除でなくアーカイブ）
 function appArchiveProject(projectId, who) {
   if (!projectId) return { ok: false };
@@ -305,6 +319,7 @@ function appAddProject(payload) {
     assignee:  String(payload.assignee || ''),
     phase:     String(payload.phase || '営業'),
     updatedBy: appWho_(payload.who) || 'webapp',
+    source:    'progress-board',
   });
-  return { ok: true, id: rec ? String(rec['案件ID'] || '') : '' };
+  return { ok: true, id: rec ? String(rec['案件ID'] || '') : '', driveStatus: rec ? String(rec['Drive同期ステータス'] || '') : '' };
 }

@@ -39,6 +39,13 @@ function pmGetProjectById(projectId) {
 // グループ紐付け・identifyProject を機能させる。戻り値: projects の行オブジェクト
 function pmEnsureProjectRecord(name, opts) {
   opts = opts || {};
+  // 同時実行時にも案件ID・Driveフォルダを一組だけ作る。
+  var locked = pmWithLock(function() { return pmEnsureProjectRecordUnlocked_(name, opts); }, 30000);
+  if (!locked.ok) throw new Error('案件作成のロックを取得できませんでした');
+  return locked.result;
+}
+
+function pmEnsureProjectRecordUnlocked_(name, opts) {
   var existing = pmGetProjectByName(name);
   if (existing) return existing;
   var now = pmTodayYmd();
@@ -70,7 +77,8 @@ function pmEnsureProjectRecord(name, opts) {
   }
   catch (e) { console.error('pmEnsureProjectRecord registerNewProject 失敗（プロジェクト管理シート未反映の可能性）:', e.message); }
   // 正規Driveフォルダ（プロジェクト管理/{案件ID}_{案件名}/[01_見積..]）を冪等作成
-  try { pmEnsureProjectFolder(id, name); } catch (e) { console.error('pmEnsureProjectRecord pmEnsureProjectFolder:', e.message); }
+  try { pmEnsureProjectFolder(id, name, { source: opts.source || 'unknown', actor: opts.updatedBy || '' }); }
+  catch (e) { console.error('pmEnsureProjectRecord pmEnsureProjectFolder:', e.message); }
   return pmGetProjectByName(name);
 }
 

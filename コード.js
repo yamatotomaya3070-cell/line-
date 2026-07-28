@@ -383,6 +383,12 @@ function handleMentionCommand(ev, groupId, userId, sender, text, ts) {
     handleSetProgressAlertHere(ev.replyToken, groupId);
     return;
   }
+  // ⓪-b 既存グループでも案件の紐付けを見直せるようにする。
+  //       ボット参加時と異なり、すでに紐付け済みでも選択UIを表示する。
+  if (isProjectLinkRequest(text)) {
+    sendProjectLinkUI(ev.replyToken, groupId, true);
+    return;
+  }
   // ① Docsサマリー更新（優先判定：「サマリー更新」「Docsまとめて」など）
   if (isDocSummaryRequest(text)) {
     handleDocSummaryRequest(ev.replyToken, text, groupId, sender);
@@ -2152,6 +2158,13 @@ function handleBotJoinGroup(replyToken, groupId) {
     sendLineReply(replyToken, 'このグループはすでに「' + existing + '」に紐付けられています。');
     return;
   }
+  sendProjectLinkUI(replyToken, groupId, false);
+}
+
+// @メンションで「案件確認」と送った時、およびボット参加時に表示する案件紐付けUI。
+// force=true の場合は、既存の紐付けがあっても選び直せる。
+function sendProjectLinkUI(replyToken, groupId, force) {
+  var existing = getProjectNameByGroupId(groupId);
   var projects = getActiveProjects(11);
   if (!projects.length) {
     sendLineReply(replyToken, 'WOODBASE秘書AIです。\nまずスプレッドシートの「プロジェクト管理」に案件をご登録ください。');
@@ -2164,7 +2177,18 @@ function handleBotJoinGroup(replyToken, groupId) {
   });
   items.push({ type: 'action', action: { type: 'postback', label: '🆕 新規プロジェクト作成',
     data: 'action=new_project_link&g=' + encodeURIComponent(groupId) } });
-  sendQuickReply(replyToken, 'WOODBASE秘書AIです。\nこのグループはどの案件に該当しますか？タップでご選択ください。', items);
+  var intro = force
+    ? '【案件確認】\n現在の紐付け：' + (existing || '未設定') + '\nこのグループの案件を選び直してください。'
+    : 'WOODBASE秘書AIです。\nこのグループはどの案件に該当しますか？タップでご選択ください。';
+  sendQuickReply(replyToken, intro, items);
+}
+
+// グループでボットにメンションして「案件確認」と送るための判定。
+// 通常の「案件更新」等とは分け、誤って紐付けUIを開かないよう確認・登録系の明示語だけに限定する。
+function isProjectLinkRequest(text) {
+  var t = String(text || '').trim();
+  // 実際のLINEメンションでは本文先頭に「@Bot名」が残るため、完全一致にはしない。
+  return /案件\s*(?:を\s*)?(?:確認|登録|紐付け|ひも付け)(?:して)?/.test(t);
 }
 
 // グループIDをプロジェクト管理シートに登録
@@ -2172,14 +2196,43 @@ function linkGroupToProject(groupId, projectName) {
   var sheet = getSheet('プロジェクト管理');
   if (!sheet) return;
   var data = sheet.getDataRange().getValues();
+  var targetRow = 0;
   for (var i = 1; i < data.length; i++) {
-    if (String(data[i][1] || '') === projectName) {
-      // グループID（施主）列（col3）が空なら登録
-      if (!data[i][2]) sheet.getRange(i + 1, 3).setValue(groupId);
-      console.log('グループ紐付け:', projectName, groupId);
+    // 選び直し時は、以前の案件に残った同じグループIDを外す。
+    if (data[i][2] === groupId) sheet.getRange(i + 1, 3).clearContent();
+    if (data[i][3] === groupId) sheet.getRange(i + 1, 4).clearContent();
+    if (String(data[i][1] || '') === projectName) targetRow = i + 1;
+  }
+  if (!targetRow) return;
+
+  // 既存の別グループを消さないよう、空いている従来列にだけ記録する。
+  var target = sheet.getRange(targetRow, 3, 1, 2).getValues()[0];
+  if (!target[0] || target[0] === groupId) sheet.getRange(targetRow, 3).setValue(groupId);
+  else if (!target[1] || target[1] === groupId) sheet.getRange(targetRow, 4).setValue(groupId);
+
+  // 新しい「案件グループ」台帳がある場合はこちらも更新する。案件解決はこの台帳を優先する。
+  try { upsertProjectGroupLink_(groupId, projectName); } catch (e) { console.warn('案件グループ更新エラー:', e.message); }
+  console.log('グループ紐付け:', projectName, groupId);
+}
+
+// 案件グループ台帳のグループIDを選択案件へ付け替える（台帳未整備時は従来動作のみ）。
+function upsertProjectGroupLink_(groupId, projectName) {
+  if (typeof PM_SHEET_GROUPS === 'undefined' || typeof pmGetProjectByName !== 'function') return;
+  var project = pmGetProjectByName(projectName);
+  var sheet = getSheet(PM_SHEET_GROUPS);
+  if (!project || !sheet || sheet.getLastRow() < 1) return;
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0].map(function(h) { return String(h).trim(); });
+  var gidCol = headers.indexOf('グループID');
+  var pidCol = headers.indexOf('案件ID');
+  if (gidCol < 0 || pidCol < 0) return;
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][gidCol] || '') === String(groupId)) {
+      sheet.getRange(i + 1, pidCol + 1).setValue(project['案件ID']);
       return;
     }
   }
+  sheet.appendRow([groupId, project['案件ID'], 'その他', '', 'LINEからの案件確認で紐付け', fmtDT(new Date())]);
 }
 
 function getProjectNameByGroupId(groupId) {
@@ -2220,6 +2273,12 @@ function detectProjectFromRecentLogs(groupId) {
 //   ここでのフラットなフォルダ作成（重複の原因）を抑止する。
 //   既存のタスク自動登録(writeTask)等から呼ばれる場合は従来どおりフォルダを作成する。
 function registerNewProject(projectName, groupId, skipDriveFolder) {
+  // LINE/Webhookからの新規案件も進捗ボードと同じ案件作成サービスへ集約する。
+  // pmEnsureProjectRecord 内部からは skipDriveFolder=true で呼ばれるため再帰しない。
+  if (!skipDriveFolder && typeof pmEnsureProjectRecord === 'function') {
+    pmEnsureProjectRecord(projectName, { groupId: groupId || '', source: 'line' });
+    return;
+  }
   var sheet = getSheet('プロジェクト管理');
   if (!sheet) return;
   var data  = sheet.getDataRange().getValues();

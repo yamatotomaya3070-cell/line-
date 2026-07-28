@@ -46,6 +46,7 @@
   .drivelink{font-size:12px;color:#2563eb;text-decoration:none;padding:5px 8px;border:1px solid var(--line);border-radius:8px;white-space:nowrap;
     font-family:inherit;background:#fff;cursor:pointer}
   .drivelink:hover{background:#eff6ff}
+  .drive-state{font-size:12px;color:var(--muted);padding:5px 2px}
   .card .foot{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
   .card select{flex:1;font-size:12px;padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
   .card input.assignee{flex:1;font-size:12px;padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);min-width:0}
@@ -156,8 +157,10 @@
     var noteText = p.note && p.note.length > 60 ? p.note.slice(0, 60) + '…' : p.note;
     var note = noteText ? '<div class="note">📝 '+esc(noteText)+'</div>' : '';
     var drive = p.driveUrl
-      ? '<a class="drivelink" href="'+esc(p.driveUrl)+'" target="_blank" rel="noopener">📁 Drive</a>'
-      : '<button class="drivelink" data-act="drive" data-id="'+esc(p.id)+'" title="既存のDriveフォルダを探して開く">📁 Drive</button>';
+      ? '<a class="drivelink" href="'+esc(p.driveUrl)+'" target="_blank" rel="noopener">📁 Google Driveを開く</a>'
+      : (p.driveStatus==='creating'
+        ? '<span class="drive-state">⏳ Drive作成中</span>'
+        : '<button class="drivelink" data-act="create-drive" data-id="'+esc(p.id)+'" title="管理者用：案件フォルダを作成または再作成">📁 '+(p.driveStatus==='error'?'Drive作成エラー（再作成）':'Driveフォルダを作成')+'</button>');
 
     var opts = phases.map(function(ph){ return '<option'+(ph===p.phase?' selected':'')+'>'+esc(ph)+'</option>'; }).join('');
 
@@ -256,20 +259,16 @@
           .withFailureHandler(function(){ toast('失敗'); }).appArchiveProject(id, whoName());
       }
     }
-    if(el.dataset.act==='drive'){
+    if(el.dataset.act==='create-drive'){
       var did = el.dataset.id;
-      // ポップアップブロック回避：クリック直後（同期）に空タブを開いておき、URL取得後にそこへ移動する
-      // （新規フォルダは作らず、既存のDriveフォルダを探して開くだけ）
-      var win = window.open('', '_blank');
-      el.disabled = true; el.textContent = '📁 探索中…';
+      el.disabled = true; el.textContent = '📁 作成中…';
       google.script.run
         .withSuccessHandler(function(r){
-          el.disabled=false; el.textContent='📁 Drive';
-          if(r.ok){ if(win) win.location = r.url; }
-          else { toast(r.msg||'失敗'); if(win) win.close(); }
+          if(r.ok){ toast('Driveフォルダを作成しました'); load(); }
+          else { toast(r.msg||'Drive作成エラー'); el.disabled=false; el.textContent='📁 Driveフォルダを作成'; }
         })
-        .withFailureHandler(function(){ toast('失敗'); if(win) win.close(); el.disabled=false; el.textContent='📁 Drive'; })
-        .appGetDriveUrl(did);
+        .withFailureHandler(function(){ toast('Drive作成エラー'); el.disabled=false; el.textContent='📁 Driveフォルダを作成'; })
+        .appCreateDriveFolder(did, whoName());
     }
   });
 
@@ -288,14 +287,18 @@
   document.getElementById('mask').addEventListener('click', function(e){ if(e.target.id==='mask') closeModal(); });
   document.getElementById('reload').addEventListener('click', load);
   document.getElementById('save').addEventListener('click', function(){
+    var saveBtn=document.getElementById('save');
+    if(saveBtn.disabled) return;
     var name=document.getElementById('f_name').value.trim();
     if(!name){ toast('案件名は必須です'); return; }
     var payload={ name:name, client:document.getElementById('f_client').value.trim(),
       assignee:document.getElementById('f_assignee').value.trim(), phase:document.getElementById('f_phase').value,
       who:whoName() };
+    saveBtn.disabled=true; saveBtn.textContent='登録中（Drive作成中）…';
     google.script.run.withSuccessHandler(function(r){
-      if(r.ok){ toast('追加しました（'+r.id+'）'); closeModal(); load(); } else { toast(r.msg||'追加失敗'); }
-    }).withFailureHandler(function(e){ toast('追加失敗：'+e.message); }).appAddProject(payload);
+      saveBtn.disabled=false; saveBtn.textContent='追加する';
+      if(r.ok){ toast(r.driveStatus==='error'?'案件を登録しました（Drive未作成）':'登録完了（'+r.id+'）'); closeModal(); load(); } else { toast(r.msg||'追加失敗'); }
+    }).withFailureHandler(function(e){ saveBtn.disabled=false; saveBtn.textContent='追加する'; toast('追加失敗：'+e.message); }).appAddProject(payload);
   });
 
   load();
