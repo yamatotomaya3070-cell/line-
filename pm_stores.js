@@ -101,9 +101,12 @@ function pmEnsureStoreRecord(projectId, storeName, opts) {
     }
 
     // フォルダを特定/作成（ROOT/案件名/店舗名/6_データ）
-    var f = pmResolveStoreFolders(caseName, storeName, {
+    // 既に pmWithLock 内なので Unlocked 版を使う（入れ子ロック回避）。
+    // rootId/templateId は opts で上書き可（テスト時は新親を指定）。
+    var f = pmResolveStoreFoldersUnlocked_(caseName, storeName, {
       projectId: projectId || '', storeId: existing ? existing['店舗ID'] : '',
       source: opts.source || 'store-record', actor: opts.actor || '',
+      rootId: opts.rootId, templateId: opts.templateId,
     });
     if (!f.ok) return { ok: false, error: 'フォルダ解決失敗: ' + f.error };
 
@@ -169,11 +172,15 @@ function pmTestStoreRecord() {
   pmEnsureStoreSheet();
   out('storesシート/列を保証しました。ヘッダー: ' + PM_STORES_HEADERS.join(', '));
 
+  // テストは新親フォルダを直接指定（本番設定=旧フォルダにはadmin書込権が無いため）
+  var testRoot = (typeof DIAG_NEW_ROOT_ID !== 'undefined') ? DIAG_NEW_ROOT_ID : '14QoHs_nlMwN7IeY-SGgQ9HX51lnsKmZl';
+  var testTpl  = (typeof DIAG_TEMPLATE_ID !== 'undefined') ? DIAG_TEMPLATE_ID  : '1eM6BVsC2T496Ve03vVa4O6gNSKS1dR-X';
+
   // caseName を明示指定（projects に依存しない）
-  var r = pmEnsureStoreRecord(fakePid, storeName, { caseName: caseName, source: 'test' });
+  var r = pmEnsureStoreRecord(fakePid, storeName, { caseName: caseName, source: 'test', rootId: testRoot, templateId: testTpl });
   out('1回目: ' + JSON.stringify({ ok: r.ok, storeId: r.storeId, error: r.error, dataFolderId: r.folders && r.folders.dataFolderId }));
 
-  var r2 = pmEnsureStoreRecord(fakePid, storeName, { caseName: caseName, source: 'test' });
+  var r2 = pmEnsureStoreRecord(fakePid, storeName, { caseName: caseName, source: 'test', rootId: testRoot, templateId: testTpl });
   out('2回目(冪等): 同一店舗ID=' + (r.ok && r2.ok && r.storeId === r2.storeId) + ' reused=' + (r2.folders && r2.folders.reused));
 
   var row = pmFindStoreRow_(fakePid, storeName);

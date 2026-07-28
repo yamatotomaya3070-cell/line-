@@ -109,42 +109,58 @@ function pmEnsureDataSubfolder_(storeFolder, templateId) {
 function pmResolveStoreFolders(caseName, storeName, opts) {
   opts = opts || {};
   var cfg = pmFolderConfig_(opts);
-  if (pmIsBlank(cfg.rootId)) return { ok: false, error: 'DRIVE_FOLDER_ID未設定' };
-  if (pmIsBlank(caseName))   return { ok: false, error: '案件名が空' };
-  if (pmIsBlank(storeName))  return { ok: false, error: '店舗名が空' };
+  var invalid = pmValidateFolderInputs_(cfg, caseName, storeName);
+  if (invalid) return invalid;
 
   var locked = pmWithLock(function () {
-    var root;
-    try { root = DriveApp.getFolderById(cfg.rootId); }
-    catch (e) { return { ok: false, error: '親フォルダ取得不可: ' + e.message }; }
-
-    var caseR  = pmEnsureChildFolder_(root, caseName);
-    var storeR = pmEnsureChildFolder_(caseR.folder, storeName);
-    var dataR  = pmEnsureDataSubfolder_(storeR.folder, cfg.templateId);
-
-    if (caseR.created || storeR.created || dataR.created) {
-      try {
-        pmAddLog(opts.projectId || '', 'drive_folder_autocreated', {
-          case: caseName, store: storeName,
-          caseCreated: caseR.created, storeCreated: storeR.created,
-          templateCopied: dataR.templateCopied, storeId: opts.storeId || '',
-          source: opts.source || 'unknown',
-        }, '', opts.actor || '', '');
-      } catch (ig) {}
-    }
-
-    return {
-      ok: true,
-      caseFolderId:  caseR.folder.getId(),  caseFolderUrl:  caseR.folder.getUrl(),
-      storeFolderId: storeR.folder.getId(), storeFolderUrl: storeR.folder.getUrl(),
-      dataFolderId:  dataR.folder.getId(),  dataFolderUrl:  dataR.folder.getUrl(),
-      caseCreated: caseR.created, storeCreated: storeR.created,
-      templateCopied: dataR.templateCopied,
-    };
+    return pmResolveStoreFoldersUnlocked_(caseName, storeName, opts, cfg);
   }, 30000);
 
   if (!locked.ok) return { ok: false, error: 'フォルダ作成ロック取得失敗' };
   return locked.result;
+}
+
+function pmValidateFolderInputs_(cfg, caseName, storeName) {
+  if (pmIsBlank(cfg.rootId)) return { ok: false, error: 'DRIVE_FOLDER_ID未設定' };
+  if (pmIsBlank(caseName))   return { ok: false, error: '案件名が空' };
+  if (pmIsBlank(storeName))  return { ok: false, error: '店舗名が空' };
+  return null;
+}
+
+// ロックを取らない中核処理。既に pmWithLock 内にいる呼び出し元（pm_stores 等）から使う。
+function pmResolveStoreFoldersUnlocked_(caseName, storeName, opts, cfg) {
+  opts = opts || {};
+  cfg = cfg || pmFolderConfig_(opts);
+  var invalid = pmValidateFolderInputs_(cfg, caseName, storeName);
+  if (invalid) return invalid;
+
+  var root;
+  try { root = DriveApp.getFolderById(cfg.rootId); }
+  catch (e) { return { ok: false, error: '親フォルダ取得不可: ' + e.message }; }
+
+  var caseR  = pmEnsureChildFolder_(root, caseName);
+  var storeR = pmEnsureChildFolder_(caseR.folder, storeName);
+  var dataR  = pmEnsureDataSubfolder_(storeR.folder, cfg.templateId);
+
+  if (caseR.created || storeR.created || dataR.created) {
+    try {
+      pmAddLog(opts.projectId || '', 'drive_folder_autocreated', {
+        case: caseName, store: storeName,
+        caseCreated: caseR.created, storeCreated: storeR.created,
+        templateCopied: dataR.templateCopied, storeId: opts.storeId || '',
+        source: opts.source || 'unknown',
+      }, '', opts.actor || '', '');
+    } catch (ig) {}
+  }
+
+  return {
+    ok: true,
+    caseFolderId:  caseR.folder.getId(),  caseFolderUrl:  caseR.folder.getUrl(),
+    storeFolderId: storeR.folder.getId(), storeFolderUrl: storeR.folder.getUrl(),
+    dataFolderId:  dataR.folder.getId(),  dataFolderUrl:  dataR.folder.getUrl(),
+    caseCreated: caseR.created, storeCreated: storeR.created,
+    templateCopied: dataR.templateCopied,
+  };
 }
 
 // ==========================================
