@@ -86,7 +86,8 @@
 <div class="mask" id="mask">
   <div class="modal">
     <h3>新規案件を追加</h3>
-    <div class="field"><label>案件名（必須）</label><input id="f_name" placeholder="例：〇〇ホテル客室改装"></div>
+    <div class="field"><label>案件名（必須）</label><input id="f_name" placeholder="例：焼肉こじま"></div>
+    <div class="field"><label>店舗名（1行に1店舗・複数可）</label><textarea id="f_stores" rows="3" placeholder="例：&#10;藤沢店&#10;大阪店" style="width:100%;box-sizing:border-box;font:inherit;padding:6px"></textarea></div>
     <div class="field"><label>クライアント名</label><input id="f_client"></div>
     <div class="field"><label>担当者</label><input id="f_assignee"></div>
     <div class="field"><label>フェーズ</label><select id="f_phase"></select></div>
@@ -185,10 +186,25 @@
     var assigneeInput = '<div class="foot">👤 <input type="text" class="assignee" data-act="assignee" data-id="'+esc(p.id)+'" '
       + 'data-orig="'+esc(p.assignee)+'" value="'+esc(p.assignee)+'" placeholder="担当者未設定" title="担当者（変更すると自動保存）"></div>';
 
+    // 案件名：新階層の案件フォルダがあればクリックで開く（§6）
+    var nameHtml = p.caseFolderUrl
+      ? '<a class="name" href="'+esc(p.caseFolderUrl)+'" target="_blank" rel="noopener" title="案件フォルダを開く" style="text-decoration:none;color:inherit">'+esc(p.name||'(無名)')+' 🔗</a>'
+      : '<div class="name">'+esc(p.name||'(無名)')+'</div>';
+
+    // 店舗：店舗名クリックで店舗の6_データを開く（§6）＋店舗追加ボタン
+    var storeLinks = (p.stores||[]).map(function(s){
+      var u = s.dataFolderUrl || s.storeFolderUrl;
+      return u ? '<a class="chip" href="'+esc(u)+'" target="_blank" rel="noopener" title="店舗フォルダ(6_データ)を開く">🏪 '+esc(s.name)+'</a>'
+               : '<span class="chip">🏪 '+esc(s.name)+'</span>';
+    }).join(' ');
+    var storesHtml = '<div class="rowchips">'+storeLinks
+      + ' <button class="chip" data-act="add-store" data-id="'+esc(p.id)+'" title="この案件に店舗を追加">＋店舗</button></div>';
+
     return '<div class="card" data-id="'+esc(p.id)+'">'
-      + '<div class="name">'+esc(p.name||'(無名)')+'</div>'
+      + nameHtml
       + (meta?'<div class="meta">'+meta+'</div>':'')
       + assigneeInput
+      + storesHtml
       + (act?'<div class="rowchips">'+act+'</div>':'')
       + (dates?'<div class="rowchips">'+dates+'</div>':'')
       + note
@@ -270,6 +286,19 @@
         .withFailureHandler(function(){ toast('Drive作成エラー'); el.disabled=false; el.textContent='📁 Driveフォルダを作成'; })
         .appCreateDriveFolder(did, whoName());
     }
+    if(el.dataset.act==='add-store'){
+      var sid = el.dataset.id;
+      var sn = (prompt('追加する店舗名を入力してください（例：藤沢店）')||'').trim();
+      if(!sn) return;
+      el.disabled = true; el.textContent = '＋作成中…';
+      google.script.run
+        .withSuccessHandler(function(r){
+          if(r.ok){ toast('店舗「'+sn+'」を追加・フォルダ作成しました'); load(); }
+          else { toast(r.msg||'店舗追加エラー'); el.disabled=false; el.textContent='＋店舗'; }
+        })
+        .withFailureHandler(function(e){ toast('店舗追加エラー：'+e.message); el.disabled=false; el.textContent='＋店舗'; })
+        .appAddStore(sid, sn, whoName());
+    }
   });
 
   // 追加モーダル
@@ -277,6 +306,7 @@
     var sel=document.getElementById('f_phase');
     sel.innerHTML = DATA.phases.map(function(p){return '<option>'+esc(p)+'</option>';}).join('');
     document.getElementById('f_name').value='';
+    document.getElementById('f_stores').value='';
     document.getElementById('f_client').value='';
     document.getElementById('f_assignee').value='';
     document.getElementById('mask').classList.add('on');
@@ -291,13 +321,18 @@
     if(saveBtn.disabled) return;
     var name=document.getElementById('f_name').value.trim();
     if(!name){ toast('案件名は必須です'); return; }
-    var payload={ name:name, client:document.getElementById('f_client').value.trim(),
+    var payload={ name:name, stores:document.getElementById('f_stores').value,
+      client:document.getElementById('f_client').value.trim(),
       assignee:document.getElementById('f_assignee').value.trim(), phase:document.getElementById('f_phase').value,
       who:whoName() };
-    saveBtn.disabled=true; saveBtn.textContent='登録中（Drive作成中）…';
+    saveBtn.disabled=true; saveBtn.textContent='登録中（フォルダ作成中）…';
     google.script.run.withSuccessHandler(function(r){
       saveBtn.disabled=false; saveBtn.textContent='追加する';
-      if(r.ok){ toast(r.driveStatus==='error'?'案件を登録しました（Drive未作成）':'登録完了（'+r.id+'）'); closeModal(); load(); } else { toast(r.msg||'追加失敗'); }
+      if(r.ok){
+        var n=(r.stores&&r.stores.length)||0;
+        toast('登録完了（'+r.id+'）'+(n?'／店舗'+n+'件・フォルダ作成':''));
+        closeModal(); load();
+      } else { toast(r.msg||'追加失敗'); }
     }).withFailureHandler(function(e){ saveBtn.disabled=false; saveBtn.textContent='追加する'; toast('追加失敗：'+e.message); }).appAddProject(payload);
   });
 

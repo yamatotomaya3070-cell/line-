@@ -46,6 +46,7 @@ function doGet(e) {
 function appGetData() {
   var phases = Object.keys(PM_PHASES);
   var rows = pmReadObjects(PM_SHEET_PROJECTS);
+  var storesByProject = appStoresByProject_();   // 案件ID→店舗配列（一括・N+1回避）
   var list = [];
   rows.forEach(function(r) {
     var kind = String(r['区分'] || '').trim();
@@ -53,8 +54,9 @@ function appGetData() {
     var canceled = String(r['取消'] || '').trim().toUpperCase();
     if (canceled === 'TRUE' || canceled === '1' || canceled === '✓' || canceled === 'YES') return;
     var phase = String(r['現在フェーズ'] || '営業');
+    var pid = String(r['案件ID'] || '');
     list.push({
-      id:         String(r['案件ID'] || ''),
+      id:         pid,
       name:       String(r['案件名'] || ''),
       client:     String(r['クライアント名'] || ''),
       assignee:   String(r['担当者'] || ''),
@@ -73,10 +75,31 @@ function appGetData() {
       note:           String(r['備考'] || ''),
       driveUrl:       String(r['DriveフォルダURL'] || ''),
       driveStatus:    String(r['Drive同期ステータス'] || (r['DriveフォルダURL'] ? 'ready' : 'missing')),
+      // 新階層：案件フォルダURL（案件名クリックで開く・§6）＋店舗一覧（店舗名クリックで店舗フォルダ）
+      caseFolderUrl:  String(r['driveProjectFolderUrl'] || ''),
+      stores:         storesByProject[pid] || [],
     });
   });
   // statusMaster: フェーズ→サブステータス候補（カードのドロップダウン用）
   return { phases: phases, statusMaster: PM_PHASES, projects: list };
+}
+
+// stores シートを一括読みして 案件ID→[{storeId,name,storeFolderUrl,dataFolderUrl}] にまとめる
+function appStoresByProject_() {
+  var map = {};
+  var rows = (typeof pmReadObjects === 'function' && getSheet(PM_SHEET_STORES)) ? pmReadObjects(PM_SHEET_STORES) : [];
+  rows.forEach(function(s) {
+    if (String(s['状態'] || '').trim().toLowerCase() === 'deleted') return;
+    var pid = String(s['案件ID'] || '').trim();
+    if (!pid) return;
+    (map[pid] = map[pid] || []).push({
+      storeId:        String(s['店舗ID'] || ''),
+      name:           String(s['店舗名'] || ''),
+      storeFolderUrl: String(s['driveStoreFolderUrl'] || ''),
+      dataFolderUrl:  String(s['driveDataFolderUrl'] || ''),
+    });
+  });
+  return map;
 }
 
 // シート値の日付をyyyy-MM-ddに整形（文字列ならそのまま）
@@ -308,18 +331,54 @@ function appSubmitAmountRequest_(kind, projectId, payload) {
 function appSubmitBillingRequest(projectId, payload) { return appSubmitAmountRequest_('billing', projectId, payload); }
 function appSubmitPaymentRequest(projectId, payload) { return appSubmitAmountRequest_('payment', projectId, payload); }
 
-// 新規案件追加（既存 pmEnsureProjectRecord を再利用＝案件ID採番・辞書同期・Driveフォルダ）
+// 新規案件追加。案件ID採番・辞書同期は既存 pmEnsureProjectRecord を再利用しつつ、
+// Driveは新階層(ROOT/案件名/店舗名/6_データ)を使う（旧構成は skipDriveFolder で停止）。
+// payload.stores（配列 or 改行/カンマ区切り文字列）で店舗を同時登録できる（§2/§6）。
 function appAddProject(payload) {
   payload = payload || {};
   var name = String(payload.name || '').trim();
   if (!name) return { ok: false, msg: '案件名は必須です' };
   if (pmGetProjectByName(name)) return { ok: false, msg: '同名の案件が既にあります' };
+
   var rec = pmEnsureProjectRecord(name, {
     client:    String(payload.client || ''),
     assignee:  String(payload.assignee || ''),
     phase:     String(payload.phase || '営業'),
     updatedBy: appWho_(payload.who) || 'webapp',
     source:    'progress-board',
+    skipDriveFolder: true,   // 新階層を使うため旧「プロジェクト管理/{ID}_{名}」は作らない
   });
-  return { ok: true, id: rec ? String(rec['案件ID'] || '') : '', driveStatus: rec ? String(rec['Drive同期ステータス'] || '') : '' };
+  var projectId = rec ? String(rec['案件ID'] || '') : '';
+
+  var stores = appParseStoreNames_(payload.stores);
+  var storeResults = [];
+  if (stores.length) {
+    stores.forEach(function(sn) {
+      var sr = pmEnsureStoreRecord(projectId, sn, { caseName: name, source: 'progress-board', actor: appActor_(payload.who) });
+      storeResults.push({ store: sn, ok: !!sr.ok, storeId: sr.storeId || '', dataFolderUrl: (sr.folders && sr.folders.dataFolderUrl) || '', error: sr.error || '' });
+    });
+  } else {
+    // 店舗未指定でも案件フォルダは用意（案件名クリックで開けるように）
+    pmEnsureCaseFolder(projectId, name, { source: 'progress-board', actor: appActor_(payload.who) });
+  }
+  return { ok: true, id: projectId, stores: storeResults };
+}
+
+// 既存案件へ店舗を追加（ダッシュボードの「店舗追加」用）。フォルダ生成＋台帳保存。
+function appAddStore(projectId, storeName, who) {
+  if (!projectId || !String(storeName || '').trim()) return { ok: false, msg: '案件と店舗名が必要です' };
+  var proj = pmGetProjectById(projectId);
+  if (!proj) return { ok: false, msg: '案件が見つかりません' };
+  var sr = pmEnsureStoreRecord(projectId, String(storeName).trim(), { caseName: proj['案件名'], source: 'progress-board', actor: appActor_(who) });
+  if (!sr.ok) return { ok: false, msg: sr.error || '店舗登録に失敗しました' };
+  return { ok: true, storeId: sr.storeId, storeFolderUrl: sr.folders && sr.folders.storeFolderUrl, dataFolderUrl: sr.folders && sr.folders.dataFolderUrl };
+}
+
+// 店舗名の複数入力を配列へ（改行/カンマ/読点区切り、空・重複除去）
+function appParseStoreNames_(raw) {
+  if (!raw) return [];
+  var arr = Array.isArray(raw) ? raw : String(raw).split(/[\n,、，]+/);
+  var seen = {}, out = [];
+  arr.forEach(function(s) { var t = String(s == null ? '' : s).trim(); if (t && !seen[t]) { seen[t] = 1; out.push(t); } });
+  return out;
 }

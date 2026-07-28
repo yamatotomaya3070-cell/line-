@@ -150,6 +150,35 @@ function pmEnsureStoreRecord(projectId, storeName, opts) {
   return locked.result;
 }
 
+// 店舗未指定の案件でも、案件フォルダ(ROOT/案件名)だけは用意して projects に保存。
+//   店舗フォルダ・6_データは店舗登録時(pmEnsureStoreRecord)に作る。
+function pmEnsureCaseFolder(projectId, caseName, opts) {
+  opts = opts || {};
+  var cfg = pmFolderConfig_(opts);
+  if (pmIsBlank(cfg.rootId)) return { ok: false, error: 'DRIVE_FOLDER_ID未設定' };
+  if (pmIsBlank(caseName))   return { ok: false, error: '案件名が空' };
+
+  var locked = pmWithLock(function () {
+    var root;
+    try { root = DriveApp.getFolderById(cfg.rootId); }
+    catch (e) { return { ok: false, error: '親フォルダ取得不可: ' + e.message }; }
+    var caseR = pmEnsureChildFolder_(root, caseName);
+    if (!pmIsBlank(projectId)) {
+      var proj = null;
+      try { proj = pmGetProjectById(projectId); } catch (e) {}
+      if (proj && proj._row) {
+        var pf = {};
+        if (pmIsBlank(proj['driveProjectFolderId']))  pf['driveProjectFolderId']  = caseR.folder.getId();
+        if (pmIsBlank(proj['driveProjectFolderUrl'])) pf['driveProjectFolderUrl'] = caseR.folder.getUrl();
+        if (Object.keys(pf).length) { try { pmWriteRowFields(PM_SHEET_PROJECTS, proj._row, pf); } catch (e) {} }
+      }
+    }
+    return { ok: true, caseFolderId: caseR.folder.getId(), caseFolderUrl: caseR.folder.getUrl(), created: caseR.created };
+  }, 30000);
+  if (!locked.ok) return { ok: false, error: '案件フォルダ作成ロック取得失敗' };
+  return locked.result;
+}
+
 // DriveフォルダIDが生存しているか（ゴミ箱含め取得可否）
 function pmDriveFolderAlive_(folderId) {
   if (pmIsBlank(folderId)) return false;

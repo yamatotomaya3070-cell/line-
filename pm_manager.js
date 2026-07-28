@@ -76,9 +76,12 @@ function pmEnsureProjectRecordUnlocked_(name, opts) {
     pmStampProjectIdInDict(name, id);
   }
   catch (e) { console.error('pmEnsureProjectRecord registerNewProject 失敗（プロジェクト管理シート未反映の可能性）:', e.message); }
-  // 正規Driveフォルダ（プロジェクト管理/{案件ID}_{案件名}/[01_見積..]）を冪等作成
-  try { pmEnsureProjectFolder(id, name, { source: opts.source || 'unknown', actor: opts.updatedBy || '' }); }
-  catch (e) { console.error('pmEnsureProjectRecord pmEnsureProjectFolder:', e.message); }
+  // 正規Driveフォルダ（旧構成: プロジェクト管理/{案件ID}_{案件名}/[01_見積..]）を冪等作成。
+  // 新階層(ROOT/案件名/店舗名/6_データ)へ移行後は skipDriveFolder=true で旧構成生成を停止する。
+  if (!opts.skipDriveFolder) {
+    try { pmEnsureProjectFolder(id, name, { source: opts.source || 'unknown', actor: opts.updatedBy || '' }); }
+    catch (e) { console.error('pmEnsureProjectRecord pmEnsureProjectFolder:', e.message); }
+  }
   return pmGetProjectByName(name);
 }
 
