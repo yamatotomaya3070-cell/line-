@@ -16,6 +16,7 @@ function getConfig() {
     SPREADSHEET_ID:            p.getProperty('SPREADSHEET_ID'),
     INTERNAL_GROUP_ID:         p.getProperty('INTERNAL_GROUP_ID'),
     DRIVE_FOLDER_ID:           p.getProperty('DRIVE_FOLDER_ID'),
+    TEMPLATE_FOLDER_ID:        p.getProperty('TEMPLATE_FOLDER_ID'),
     CALENDAR_ID:               p.getProperty('CALENDAR_ID'),
   };
 }
