@@ -41,6 +41,8 @@ var PM_PROJECTS_HEADERS = [
   '施工進捗',
   // Drive連携の状態。既存案件には列を追加するだけで、既存フォルダの検索・移動はしない。
   'DriveフォルダID', 'Driveフォルダ名', 'Drive作成日時', 'Drive同期ステータス', 'Drive同期エラー',
+  // 新階層(ROOT/案件名/店舗名/6_データ)の案件フォルダ。旧 DriveフォルダID/URL とは別管理。
+  'driveProjectFolderId', 'driveProjectFolderUrl',
 ];
 
 // 案件グループ（1案件に複数グループをぶら下げる・フェーズ1.5）
@@ -270,6 +272,8 @@ function pmSetupSheets() {
   setupSheet(ss, PM_SHEET_GROUPS,   PM_GROUPS_HEADERS,   '#6FA8DC', null);
   setupSheet(ss, PM_SHEET_SETTINGS, PM_SETTINGS_HEADERS, '#999999', null);
   setupSheet(ss, PM_SHEET_INTERNAL_GROUPS, PM_INTERNAL_GROUPS_HEADERS, '#B4A7D6', null);
+  // stores シート（店舗エンティティ・Phase 2）と projects の新階層列を保証
+  if (typeof pmEnsureStoreSheet === 'function') pmEnsureStoreSheet();
   // PM設定シートに既定キーの行を用意（値は運用者が記入。ソースにはIDを書かない）
   pmSeedSettingRows();
   // 社内グループシートに既定の役割行を用意（グループIDは運用者が記入）
