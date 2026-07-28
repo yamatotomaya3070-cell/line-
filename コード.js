@@ -92,10 +92,52 @@ function doPost(e) {
     if (!verifyLineWebhook(e)) return okRes();
     var events = JSON.parse(e.postData.contents).events || [];
     for (var i = 0; i < events.length; i++) {
+      // 冪等性：LINEのWebhook再送（同一イベントの複数配信）で二重処理しない
+      if (isWebhookEventProcessed(events[i])) {
+        console.log('Webhook再送をスキップ:', webhookEventKey(events[i]));
+        continue;
+      }
       try { handleEvent(events[i]); } catch (err) { console.error('event error:', err.message); }
     }
   } catch (err) { console.error('doPost error:', err.message); }
   return okRes();
+}
+
+// Webhookイベントの一意キー（再送判定用）。webhookEventId 優先、無ければ種別＋メッセージID＋タイムスタンプ。
+function webhookEventKey(ev) {
+  if (!ev) return '';
+  if (ev.webhookEventId) return 'we:' + ev.webhookEventId;
+  var parts = [
+    ev.type || '',
+    (ev.message && ev.message.id) || '',
+    (ev.postback && ev.postback.data) || '',
+    ev.replyToken || '',
+    ev.timestamp || '',
+    (ev.source && (ev.source.userId || ev.source.groupId || ev.source.roomId)) || '',
+  ];
+  return 'ev:' + parts.join('|');
+}
+
+// 既に処理済みのWebhookイベントか判定し、未処理なら「処理済み」として記録する（check-and-set）。
+//   - CacheService（最大6時間）で記録。LINEの再送は通常数分〜数十分以内。
+//   - 同時並走（同一イベントの同時2配信）対策に LockService で直列化。
+function isWebhookEventProcessed(ev) {
+  var key = webhookEventKey(ev);
+  if (!key) return false; // キーが取れない場合は従来どおり処理（取りこぼし防止）
+  var cache = CacheService.getScriptCache();
+  var lock = LockService.getScriptLock();
+  var locked = false;
+  try {
+    try { lock.waitLock(5000); locked = true; } catch (e) { locked = false; }
+    if (cache.get(key)) return true;          // 既に処理済み
+    cache.put(key, '1', 21600);               // 6時間保持（再送ウィンドウを十分カバー）
+    return false;
+  } catch (err) {
+    console.error('isWebhookEventProcessed error:', err.message);
+    return false; // 判定不能時は処理を継続（重複より取りこぼしを避ける）
+  } finally {
+    if (locked) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // 単体テスト：HMAC計算が期待通り動くか確認
@@ -194,10 +236,18 @@ function handleDM(ev, userId, groupId, sender, text, ts) {
   }
   // 見積設定一覧コマンド
   if (handleEstimateSettingsListRequest(ev, text)) return;
+  // パイオニア什器 見積書作成（制作一覧→店舗別シート。東邦家具判定より先に）
+  if (handleEstimateCommand(ev, text)) return;
   // 見積書作成リクエスト（進捗質問より先に処理）
   if (handleEstimateCreateRequest(ev, text)) return;
   // 進捗管理表への自然文クエリ（完了報告誤判定より先に処理）
   if (handleProgressQuestionRequest(ev, text)) return;
+  // プロジェクト進捗管理（案件更新/新規案件/請求更新/入金更新 等のプレフィックス）
+  if (pmRouteText(ev, text, sender, userId, groupId)) return;
+  // 「URL」等 → 進捗ボード/請求・入金/タスク の各URLを返す
+  if (isDashboardUrlRequest(text)) { handleDashboardUrlRequest(ev.replyToken, sender); return; }
+  // 残タスク一覧（タップで完了できるボタン付き）
+  if (isTaskListRequest(text)) { handleTaskListWithButtons(ev.replyToken, sender); return; }
   if (isCompletionReport(text)) { handleCompletion(text, sender, ev.replyToken); return; }
   if (isSummaryRequest(text)) { sendLineReply(ev.replyToken, '【会話まとめ】\n' + summarizeChat(userId)); return; }
   // ボールホルダー照会
@@ -229,9 +279,9 @@ function handleDM(ev, userId, groupId, sender, text, ts) {
 // ==========================================
 // SECTION 3: グループメッセージ
 //
-// 設計原則：グループは静かに保つ
-//   - 通常メッセージ → サイレント処理のみ（ログ保存・将来の参照用）
-//   - @WBG メンション → handleMentionCommand → 即登録＋グループ返信
+// 設計原則：グループは静かに保つ（水面下で動く）
+//   - 通常メッセージ → タスク・予定を自動検出。検出したら送信者のDMで確認（グループには返信しない）
+//   - @WBG メンション → handleMentionCommand → 照会・コマンドに応答（タスク登録はしない）
 // ==========================================
 function handleGroup(ev, groupId, userId, sender, text, ts) {
   var mention      = ev.message.mention;
@@ -247,16 +297,92 @@ function handleGroup(ev, groupId, userId, sender, text, ts) {
     text = ev.message.text;
   }
 
+  // プロジェクト進捗管理：明示プレフィックス（案件更新/新規案件/請求更新 等）は
+  // メンション不要で反応（pmClassifyIntentが非該当なら即false＝既存挙動を維持）
+  if (pmRouteText(ev, text, sender, userId, groupId)) return;
+
+  // @WBG メンション → 照会・コマンドに応答（タスク登録はしない）
   if (botMentioned) {
     handleMentionCommand(ev, groupId, userId, sender, text, ts);
     return;
   }
 
-  // 通常メッセージ → グループには何も返さない（サイレント）
+  // 通常メッセージ → 水面下でタスク・予定を自動検出し、即登録（グループには返信しない）
+  detectTasksSilently(ev, groupId, userId, sender, text, ts);
+}
+
+// 通常メッセージからタスク・予定を自動検出し、即登録する（グループはサイレント）
+//   - メンション不要。タスク・予定らしき文面が出たら反応する＝「初めの」挙動
+//   - 確認を挟まず即登録。タスク・予定とも同じ流れで登録する
+//   - @メンションされた人は担当者／参加者に加え、DM通知・カレンダー招待で予定を反映する
+//   - グループには一切返信しない＝水面下で動く
+function detectTasksSilently(ev, groupId, userId, sender, text, ts) {
+  if (!userId) return;                       // 送信元が不明なら何もしない
+  if (shouldSkipExtraction(text)) return;    // 短文・絵文字のみ等はGemini呼び出しをスキップ
+
+  var extracted = extractWithGemini(text, groupId, ts, sender);
+  if (!extracted || (extracted.tasks.length + extracted.schedules.length === 0)) return;
+
+  // @メンションされた人 → タスク担当者・予定参加者に追加（DM通知・カレンダー反映用）
+  var mentionedNames = getMentionedMemberNames(ev);
+  if (mentionedNames.length) {
+    extracted.tasks.forEach(function(t)     { t.assignee  = mergeNames(t.assignee, mentionedNames); });
+    extracted.schedules.forEach(function(s) { s.attendees = mergeNames(s.attendees, mentionedNames); });
+  }
+
+  // 保存先プロジェクト：紐付け済み > 高確度の既存案件 > 未分類（誤った新規案件の自動生成は避ける）
+  var projectName = resolveProjectForAutoCommit(groupId, text, extracted.projectNameHint);
+
+  // 確認を挟まず即登録（commitDirectly がタスク・予定の両方を処理）
+  commitDirectly(extracted, projectName, groupId, userId);
+}
+
+// 自動登録用の保存先プロジェクトを決定する
+//   - グループ紐付け済み → その案件
+//   - 未紐付けでも本文/ヒントが既存案件に高確度一致 → その案件
+//   - それ以外 → 未分類（存在しない案件名での新規自動生成を防ぐ）
+function resolveProjectForAutoCommit(groupId, text, hint) {
+  var bound = getProjectNameByGroupId(groupId);
+  if (bound) return bound;
+  var cands = getProjectCandidates(text, groupId, hint, 1);
+  if (cands.length && cands[0].confidence >= 70) return cands[0].name;
+  return '未分類';
+}
+
+// メッセージで@メンションされたメンバー名一覧（Bot自身は除外）
+function getMentionedMemberNames(ev) {
+  var names = [];
+  var mention = ev && ev.message && ev.message.mention;
+  if (!mention || !mention.mentionees || !mention.mentionees.length) return names;
+  var botId = getCachedBotUserId();
+  mention.mentionees.forEach(function(m) {
+    if (m.isSelf === true) return;
+    if (botId && m.userId === botId) return;
+    if (!m.userId) return;
+    var name = getMemberNameByUserId(m.userId);
+    if (name && names.indexOf(name) === -1) names.push(name);
+  });
+  return names;
+}
+
+// 既存の担当者/参加者文字列に、追加メンバー名を重複なく結合（「、」区切り）
+function mergeNames(existing, additions) {
+  var out = [];
+  splitMemberNames(existing).forEach(function(n) { if (out.indexOf(n) === -1) out.push(n); });
+  (additions || []).forEach(function(n) {
+    var nn = normalizeMemberName(n);
+    if (nn && out.indexOf(nn) === -1) out.push(nn);
+  });
+  return out.join('、');
 }
 
 // Bot宛メンション時のコマンド処理（グループへの返信あり）
 function handleMentionCommand(ev, groupId, userId, sender, text, ts) {
+  // ⓪ 「ここに進捗アラート」→ このグループを放置アラート通知先に登録（進捗質問より先に）
+  if (isSetProgressAlertHereRequest(text)) {
+    handleSetProgressAlertHere(ev.replyToken, groupId);
+    return;
+  }
   // ① Docsサマリー更新（優先判定：「サマリー更新」「Docsまとめて」など）
   if (isDocSummaryRequest(text)) {
     handleDocSummaryRequest(ev.replyToken, text, groupId, sender);
@@ -267,6 +393,8 @@ function handleMentionCommand(ev, groupId, userId, sender, text, ts) {
     sendLineReply(ev.replyToken, '【会話まとめ】\n' + summarizeChat(groupId));
     return;
   }
+  // ② パイオニア什器 見積書作成（東邦家具判定より先に）
+  if (handleEstimateCommand(ev, text)) return;
   // ② 見積書作成リクエスト（進捗質問より先に処理）
   if (handleEstimateCreateRequest(ev, text)) return;
   // ③ 進捗管理表への自然文クエリ（完了報告誤判定より先に処理）
@@ -310,54 +438,28 @@ function handleMentionCommand(ev, groupId, userId, sender, text, ts) {
     var grpAddrAns = answerAddressOrCompanyQuery(text);
     if (grpAddrAns) { sendLineReply(ev.replyToken, grpAddrAns); return; }
   }
+  // ④-d' 残タスク一覧（タップで完了できるボタン付き・全体表示）
+  if (isTaskListRequest(text)) {
+    handleTaskListWithButtons(ev.replyToken, null);
+    return;
+  }
+  // ④-d'' 「URL」等 → 進捗ボード/請求・入金/タスク の各URLを返す
+  if (isDashboardUrlRequest(text)) {
+    handleDashboardUrlRequest(ev.replyToken, sender);
+    return;
+  }
+  // ④-d''' 「ここに進捗アラート」→ このグループを放置アラートの通知先に登録
+  if (isSetProgressAlertHereRequest(text)) {
+    handleSetProgressAlertHere(ev.replyToken, groupId);
+    return;
+  }
   // ④-d タスク・スケジュール照会
   if (isQuery(text)) {
     sendLineReply(ev.replyToken, answerQuery(text));
     return;
   }
-  // ⑤ タスク・スケジュール登録（@WBG メンション付き）
-  // メンション時はルールフィルタを通さず、Geminiに必ず判断させる
-  if (!shouldSkipExtraction(text)) {
-    var extracted = extractWithGemini(text, groupId, ts, sender);
-    if (extracted && (extracted.tasks.length + extracted.schedules.length > 0)) {
-      // 曖昧な予定（5W1H不足）は質問を返す
-      var question = buildAmbiguityQuestion(extracted);
-      if (question) {
-        var bidQ = storePending(extracted, '', groupId, userId, text);
-        setRetryMode(userId, bidQ);
-        sendLineReply(ev.replyToken, question);
-        return;
-      }
-
-      // グループが特定プロジェクトに紐付け済み → 従来通り即登録（明示的紐付けのため）
-      var boundProject = getProjectNameByGroupId(groupId);
-      if (boundProject) {
-        var registered = commitDirectly(extracted, boundProject, groupId, userId);
-        if (registered.tasks.length || registered.schedules.length) {
-          var cancelKey = saveCancelInfo(registered);
-          sendQuickReply(ev.replyToken,
-            buildRegisteredMsg(registered) + '\n\n間違いがあれば取消できます。',
-            [{ type: 'action', action: { type: 'postback', label: '↩️ 取消', data: 'action=cancel&key=' + cancelKey } }]
-          );
-        }
-        return;
-      }
-
-      // グループ未紐付け → 必ずユーザーに保存先を選んでもらう（AI自動確定しない）
-      var batchId = storePending(extracted, '', groupId, userId, text);
-      var allProjects = getProjectData();
-      if (!allProjects.length) {
-        // 既存プロジェクトが1件もない → 新規作成プロンプトへ直行
-        setNewProjectMode(userId, batchId);
-        sendLineReply(ev.replyToken,
-          '【新規プロジェクト作成】\n保存先のプロジェクト名を次のメッセージでご入力ください（10分以内、「キャンセル」で中止）。');
-        return;
-      }
-      var candidates = getProjectCandidates(text, groupId, extracted.projectNameHint, 4);
-      sendProjectSelectUI(ev.replyToken, extracted, batchId, candidates, groupId, extracted.projectNameHint);
-      return;
-    }
-  }
+  // ⑤ タスク・スケジュール登録はメンションでは行わない
+  //    （通常メッセージから detectTasksSilently が水面下で自動検出する）
   // ⑥ 何も該当しない → Geminiに会話履歴を渡して文脈に沿った返答を生成
   sendLineReply(ev.replyToken, answerWithContext(text, groupId, sender));
 }
@@ -565,14 +667,19 @@ function extractWithGemini(message, groupId, timestamp, senderName) {
     '・テキストから読み取れる物件名・案件名・施主名があれば projectNameHint に入れる\n' +
     '・確信がなければ空文字にする（誤判定しない）\n' +
     '\n【複数タスク・スケジュール】必ず配列で個別出力。絶対にまとめない。\n' +
+    '\n【日付の確定判定（dateConfirmed・必須）】\n' +
+    '・「7/25」「明日」「来週火曜」「5月10日」など日にちが1日に特定できる → dateConfirmed: true\n' +
+    '・「来週あたり」「近いうち」「そのうち」「今月中旬」「〜頃」「日程未定」「たぶん」など曖昧・仮の表現 → dateConfirmed: false\n' +
+    '・曖昧な場合も deadline/date にはおおよその日付を入れてよいが、dateConfirmed は必ず false にする\n' +
+    '・日付が全く無い場合も dateConfirmed: false\n' +
     '\n【出力（JSONのみ・前置き不要）】\n' +
     '{\n' +
     '  "projectNameHint": "テキストから読み取れる案件名（確信なければ空文字）",\n' +
     '  "tasks": [\n' +
-    '    {"assignee":"","taskContent":"","deadline":"yyyy-MM-dd or \'\'"}\n' +
+    '    {"assignee":"","taskContent":"","deadline":"yyyy-MM-dd or \'\'","dateConfirmed":true|false}\n' +
     '  ],\n' +
     '  "schedules": [\n' +
-    '    {"title":"","date":"yyyy-MM-dd","startTime":"HH:mm or \'\'","endTime":"HH:mm or \'\'","location":"","attendees":"","description":""}\n' +
+    '    {"title":"","date":"yyyy-MM-dd","startTime":"HH:mm or \'\'","endTime":"HH:mm or \'\'","location":"","attendees":"","description":"","dateConfirmed":true|false}\n' +
     '  ]\n' +
     '}\n' +
     '\nタスクもスケジュールもなければ両方空配列。\n' +
@@ -595,10 +702,11 @@ function extractWithGemini(message, groupId, timestamp, senderName) {
     return {
       projectNameHint: parsed.projectNameHint || '',
       tasks: (Array.isArray(parsed.tasks) ? parsed.tasks : []).map(function(t) {
-        return { assignee: t.assignee || '', taskContent: t.taskContent || '', deadline: t.deadline || '', groupId: groupId, datetime: timestamp, urgency: urgent ? '高' : '' };
+        // dateConfirmed未返却（旧レスポンス等）は期日ありなら確定扱いで従来動作を維持
+        return { assignee: t.assignee || '', taskContent: t.taskContent || '', deadline: t.deadline || '', dateConfirmed: t.dateConfirmed === undefined ? !!t.deadline : t.dateConfirmed === true, groupId: groupId, datetime: timestamp, urgency: urgent ? '高' : '' };
       }),
       schedules: (Array.isArray(parsed.schedules) ? parsed.schedules : []).map(function(s) {
-        return { title: s.title || '', date: s.date || '', startTime: s.startTime || '', endTime: s.endTime || '', location: s.location || '', attendees: s.attendees || '', description: s.description || '', groupId: groupId, datetime: timestamp };
+        return { title: s.title || '', date: s.date || '', startTime: s.startTime || '', endTime: s.endTime || '', location: s.location || '', attendees: s.attendees || '', description: s.description || '', dateConfirmed: s.dateConfirmed === undefined ? !!s.date : s.dateConfirmed === true, groupId: groupId, datetime: timestamp };
       }),
     };
   } catch (err) {
@@ -781,11 +889,11 @@ function storePending(extracted, projectName, groupId, userId, rawMessage) {
     idx++;
     sheet.appendRow([batchId, idx, 'task', groupId, userId,
       projectName || '', t.taskContent || '', t.assignee || '', t.deadline || '',
-      now, idx === 1 ? rawMessage : '', JSON.stringify({ urgency: t.urgency || '' })]);
+      now, idx === 1 ? rawMessage : '', JSON.stringify({ urgency: t.urgency || '', dateConfirmed: t.dateConfirmed !== false })]);
   });
   extracted.schedules.forEach(function(s) {
     idx++;
-    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '' });
+    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '', dateConfirmed: s.dateConfirmed !== false });
     sheet.appendRow([batchId, idx, 'schedule', groupId, userId,
       projectName || '', s.title || '', s.attendees || '',
       (s.date || '') + (s.startTime ? ' ' + s.startTime : ''),
@@ -805,13 +913,13 @@ function sendConfirmUI(replyToken, extracted, projectName, batchId) {
       '\n📋 タスク' + (extracted.tasks.length > 1 ? (i + 1) : '') +
       '\n担当：' + (t.assignee || '未定') +
       '\n内容：' + t.taskContent +
-      (t.deadline ? '\n期日：' + t.deadline : '')
+      (t.deadline ? '\n期日：' + t.deadline + (t.dateConfirmed === false ? '（仮）' : '') : '')
     );
   });
   extracted.schedules.forEach(function(s, i) {
     lines.push(
       '\n📅 予定' + (extracted.schedules.length > 1 ? (i + 1) : '') +
-      '\n日時：' + s.date + (s.startTime ? ' ' + s.startTime + '〜' : '') +
+      '\n日時：' + s.date + (s.dateConfirmed === false ? '（仮）' : '') + (s.startTime ? ' ' + s.startTime + '〜' : '') +
       '\n内容：' + s.title
     );
   });
@@ -923,7 +1031,7 @@ function sendQuickReplyPush(targetId, text, items) {
 }
 
 // タスク確認をグループではなく送信者のDMへ送信
-function sendConfirmToDM(userId, extracted, proj, batchId) {
+function sendConfirmToDM(userId, extracted, proj, batchId, groupId, text) {
   if (!userId) return;
 
   var lines = ['📝 タスク／予定を検出いたしました。'];
@@ -940,9 +1048,9 @@ function sendConfirmToDM(userId, extracted, proj, batchId) {
       { type: 'action', action: { type: 'postback', label: '❌ 無視', data: 'action=ignore&batch=' + batchId } },
     ];
   } else {
-    // 案件不明 → 候補 + 新規作成 から選択
+    // 案件不明 → 候補 + 新規作成 から選択（メッセージ文面・案件ヒントから候補を順位付け）
     lines.push('\n保存先プロジェクトをご選択ください。');
-    var cands = getProjectCandidates('', '', '', 4);
+    var cands = getProjectCandidates(text || '', groupId || '', (extracted && extracted.projectNameHint) || '', 4);
     cands.forEach(function(c) {
       var label = c.name.length > 18 ? c.name.slice(0, 17) + '…' : c.name;
       items.push({ type: 'action', action: { type: 'postback', label: label, data: 'action=set_project&batch=' + batchId + '&p=' + encodeURIComponent(c.name), displayText: c.name + 'に保存します' } });
@@ -959,6 +1067,8 @@ function sendConfirmToDM(userId, extracted, proj, batchId) {
 // ==========================================
 function handlePostback(ev, userId, groupId) {
   var data    = (ev.postback && ev.postback.data) ? ev.postback.data : '';
+  // プロジェクト進捗管理の承認/却下/案件選択（pm_*）を最優先で処理
+  if (pmRoutePostback(ev, userId, groupId)) return;
   var params  = parseParams(data);
   var action  = params.action;
   var batchId = params.batch;
@@ -1013,6 +1123,10 @@ function handlePostback(ev, userId, groupId) {
   }
 
   // batchId不要アクションを先に処理（到達不能バグ修正）
+  if (action === 'task_done') {
+    handleTaskDonePostback(ev, params);
+    return;
+  }
   if (action === 'doc_summary') {
     handleDocSummaryPostback(ev, params);
     return;
@@ -1172,12 +1286,15 @@ function commitDirectly(extracted, projectName, groupId, userId) {
       created_at:   fmtDT(new Date()),
       group_id:     groupId,
       urgency:      t.urgency     || '',
+      date_confirmed: t.dateConfirmed !== false,
     };
     writeTask(task);
     notifyAssignee(task);
     registered.tasks.push(task);
   });
   extracted.schedules.forEach(function(s) {
+    // 重複防止：同グループ・同タイトル・同日付の予定は二重登録しない（シート/カレンダー/DMの重複を防ぐ）
+    if (isDuplicateSchedule(s.title, s.date, groupId)) return;
     var schedule = {
       project_name: projectName,
       title:        s.title       || '',
@@ -1189,9 +1306,12 @@ function commitDirectly(extracted, projectName, groupId, userId) {
       description:  s.description || '',
       group_id:     groupId,
       datetime:     new Date(),
+      date_confirmed: s.dateConfirmed !== false,
     };
     writeSchedule(schedule);
-    addToCalendar(schedule);
+    // 日程未確定の予定はカレンダー登録せずDM通知のみ
+    var meetLink = schedule.date_confirmed ? addToCalendar(schedule) : '';
+    notifySchedulePeople(schedule, meetLink);
     registered.schedules.push(schedule);
   });
   return registered;
@@ -1225,11 +1345,12 @@ function applyProjectToPending(batchId, projectName) {
 function rebuildExtractedFromPending(items, projectName) {
   var extracted = { tasks: [], schedules: [] };
   items.forEach(function(row) {
+    var extra = safeParseJson(row[11]);
     if (row[2] === 'task') {
-      extracted.tasks.push({ taskContent: row[6], assignee: row[7], deadline: row[8] });
+      extracted.tasks.push({ taskContent: row[6], assignee: row[7], deadline: row[8], dateConfirmed: extra.dateConfirmed !== false });
     } else if (row[2] === 'schedule') {
       var parts = String(row[8]).split(' ');
-      extracted.schedules.push({ title: row[6], date: parts[0] || '', startTime: parts[1] || '', attendees: row[7] });
+      extracted.schedules.push({ title: row[6], date: parts[0] || '', startTime: parts[1] || '', attendees: row[7], dateConfirmed: extra.dateConfirmed !== false });
     }
   });
   return extracted;
@@ -1259,6 +1380,7 @@ function commitPendingItems(items) {
         created_at:   fmtDT(new Date()),
         group_id:     groupId,
         urgency:      extra.urgency || '',
+        date_confirmed: extra.dateConfirmed !== false,
       };
       writeTask(task);
       notifyAssignee(task);
@@ -1277,9 +1399,12 @@ function commitPendingItems(items) {
         description:  extra.description || '',
         group_id:     groupId,
         datetime:     new Date(),
+        date_confirmed: extra.dateConfirmed !== false,
       };
       writeSchedule(schedule);
-      addToCalendar(schedule);
+      // 日程未確定の予定はカレンダー登録せずDM通知のみ
+      var meetLink = schedule.date_confirmed ? addToCalendar(schedule) : '';
+      notifySchedulePeople(schedule, meetLink);
       registered.schedules.push(schedule);
     }
   });
@@ -1292,24 +1417,50 @@ function buildRegisteredMsg(registered) {
     lines.push('\n' + (t.urgency === '高' ? '🚨 緊急タスク' : '📋 タスク') + '\n案件：' + (t.project_name || '未分類') +
       '\n担当：' + (t.assignee || '未定') +
       '\n内容：' + t.content +
-      (t.due_date ? '\n期日：' + t.due_date : ''));
+      (t.due_date ? '\n期日：' + t.due_date + (t.date_confirmed === false ? '（仮・カレンダー未登録）' : '') : ''));
   });
   registered.schedules.forEach(function(s) {
     lines.push('\n📅 予定\n案件：' + (s.project_name || '未分類') +
-      '\n日時：' + s.date + (s.startTime ? ' ' + s.startTime + '〜' : '') +
+      '\n日時：' + s.date + (s.date_confirmed === false ? '（仮・カレンダー未登録）' : '') + (s.startTime ? ' ' + s.startTime + '〜' : '') +
       '\n内容：' + s.title);
   });
   return lines.join('\n');
 }
 
 function notifyAssignee(task) {
-  var uid = getMemberUserId(task.assignee);
-  if (uid) sendLineMessage(uid,
-    (task.urgency === '高' ? '🚨【至急】タスクのご連絡\n' : '【タスクのご連絡】\n') +
+  var dueLabel = task.due_date
+    ? task.due_date + (task.date_confirmed === false ? '（仮・カレンダー未登録）' : '')
+    : '未定';
+  var msg = (task.urgency === '高' ? '🚨【至急】タスクのご連絡\n' : '【タスクのご連絡】\n') +
     '案件：' + (task.project_name || '未分類') +
     '\n内容：' + task.content +
-    '\n期日：' + (task.due_date || '未定') +
-    '\n\nご確認のほどよろしくお願いいたします。');
+    '\n期日：' + dueLabel +
+    '\n\nご確認のほどよろしくお願いいたします。';
+  notifyMembersByNames(task.assignee, msg);
+}
+
+// 予定の参加者全員に予定内容をDM通知（カレンダー招待と併せて予定を反映）
+function notifySchedulePeople(schedule, meetLink) {
+  if (!schedule || !schedule.attendees) return;
+  var isTentative = schedule.date_confirmed === false;
+  var msg = '【予定のご連絡】\n案件：' + (schedule.project_name || '未分類') +
+    '\n予定：' + schedule.title +
+    '\n日時：' + (schedule.date ? schedule.date + (isTentative ? '（仮）' : '') : '未定') + (schedule.startTime ? ' ' + schedule.startTime : '') +
+    (schedule.location ? '\n場所：' + schedule.location : '') +
+    (meetLink ? '\n会議URL：' + meetLink : '') +
+    (isTentative
+      ? '\n\n※日程が未確定のためカレンダーには登録していません。確定後に改めてご連絡ください。'
+      : '\n\nカレンダーに登録しました。ご確認のほどよろしくお願いいたします。');
+  notifyMembersByNames(schedule.attendees, msg);
+}
+
+// 名前文字列（複数名可）を分解し、各メンバーのDMへ通知（同一userIdへの重複送信は防止）
+function notifyMembersByNames(namesText, message) {
+  var seen = {};
+  splitMemberNames(namesText).forEach(function(name) {
+    var uid = getMemberUserId(name);
+    if (uid && !seen[uid]) { seen[uid] = true; sendLineMessage(uid, message); }
+  });
 }
 
 // ==========================================
@@ -1486,7 +1637,8 @@ function writeTask(task) {
     task.urgency || '',
   ]);
   if (task.project_name && task.project_name !== '未分類') registerNewProject(task.project_name, task.group_id);
-  addTaskToCalendar(task);
+  // 期日未確定（date_confirmed === false）のタスクはカレンダー登録しない（DM通知のみ）
+  if (task.date_confirmed !== false) addTaskToCalendar(task);
 }
 
 // スケジュール管理シート列: 登録日時|案件名|予定タイトル|日付|開始時間|終了時間|場所|参加者|詳細|グループID
@@ -1511,22 +1663,68 @@ function saveMessageLog(groupId, senderName, text, timestamp) {
 // ==========================================
 // SECTION 12: Google Calendar
 // ==========================================
+
+// オンライン面談の判定キーワード（タイトル・場所・備考のいずれかに含まれれば対象）
+var ONLINE_MEETING_KEYWORDS = [
+  'オンライン', 'リモート', 'ビデオ会議', 'ビデオ通話', 'テレビ会議',
+  'web会議', 'web面談', 'web打合せ', 'web打ち合わせ', 'google meet', 'グーグルミート',
+];
+
+function isOnlineSchedule(schedule) {
+  var text = ((schedule.title || '') + ' ' + (schedule.location || '') + ' ' + (schedule.description || '')).toLowerCase();
+  return ONLINE_MEETING_KEYWORDS.some(function(kw) { return text.indexOf(kw) !== -1; });
+}
+
+// 本文に既に会議URL（Zoom/Meet/Teams/Webex）があればそれを優先し、Meetの二重発行を防ぐ
+function findExistingConferenceUrl(schedule) {
+  var text = (schedule.location || '') + ' ' + (schedule.description || '');
+  var m = text.match(/https?:\/\/\S*(zoom\.us|meet\.google\.com|teams\.microsoft\.com|webex\.com)\S*/i);
+  return m ? m[0] : '';
+}
+
+// Calendar API (Advanced Service) で Google Meet リンク付き予定を作成し、MeetのURLを返す
+function createMeetEvent(calendarId, title, start, end, description, location, guestEmails) {
+  var resource = {
+    summary: title,
+    description: description,
+    location: location || 'オンライン',
+    start: { dateTime: start.toISOString(), timeZone: 'Asia/Tokyo' },
+    end:   { dateTime: end.toISOString(),   timeZone: 'Asia/Tokyo' },
+    attendees: guestEmails.map(function(email) { return { email: email }; }),
+    conferenceData: {
+      createRequest: {
+        requestId: Utilities.getUuid(),
+        conferenceSolutionKey: { type: 'hangoutsMeet' },
+      },
+    },
+  };
+  var ev = Calendar.Events.insert(resource, calendarId, {
+    conferenceDataVersion: 1,
+    sendUpdates: guestEmails.length ? 'all' : 'none',
+  });
+  if (ev.hangoutLink) return ev.hangoutLink;
+  var eps = ev.conferenceData && ev.conferenceData.entryPoints;
+  return (eps && eps.length && eps[0].uri) || '';
+}
+
+// 戻り値: 会議URL（オンライン面談でMeetを発行 or 本文中の既存URL）。なければ ''
 function addToCalendar(schedule) {
   try {
     var config = getConfig();
     if (!schedule.date || !config.CALENDAR_ID) {
       console.log('addToCalendar スキップ: date=' + schedule.date + ' CALENDAR_ID=' + (config.CALENDAR_ID ? '設定済' : '未設定'));
-      return;
+      return '';
     }
     var calendar = CalendarApp.getCalendarById(config.CALENDAR_ID);
     if (!calendar) {
       console.error('addToCalendar: カレンダーが見つかりません CALENDAR_ID=' + config.CALENDAR_ID);
-      return;
+      return '';
     }
 
     var title = '【' + (schedule.project_name || 'WOODBASE') + '】' + schedule.title;
     var date  = new Date(schedule.date);
-    var guests = getMemberGoogleEmailsFromNames(schedule.attendees).join(',');
+    var guestList = getMemberGoogleEmailsFromNames(schedule.attendees);
+    var guests = guestList.join(',');
     var description = buildCalendarDescription(schedule.description, schedule.attendees);
     var options = { location: schedule.location || '', description: description };
     if (guests) { options.guests = guests; options.sendInvites = true; }
@@ -1543,15 +1741,28 @@ function addToCalendar(schedule) {
       // 重複チェック：同日・同時刻・完全同一タイトルのみスキップ
       if (hasSimilarCalendarEvent(calendar, title, start, end, false)) {
         console.log('addToCalendar 重複スキップ:', title);
-        return;
+        return '';
+      }
+      // オンライン面談 → Google Meet リンク付きで作成（既存の会議URLがあれば発行しない）
+      var existingUrl = findExistingConferenceUrl(schedule);
+      if (!existingUrl && isOnlineSchedule(schedule)) {
+        try {
+          var meetLink = createMeetEvent(config.CALENDAR_ID, title, start, end, description, schedule.location, guestList);
+          console.log('カレンダー登録完了(Meet付き):', title + ' / ' + meetLink + (guests ? ' / 招待=' + guests : ''));
+          return meetLink;
+        } catch (meetErr) {
+          console.warn('Meet付き登録に失敗、通常登録にフォールバック:', meetErr.message);
+        }
       }
       calendar.createEvent(title, start, end, options);
-    } else {
-      // 終日イベントは重複チェックしない（同日に同名予定が複数登録されるケースは少ない）
-      calendar.createAllDayEvent(title, date, options);
+      console.log('カレンダー登録完了:', title + (guests ? ' / 招待=' + guests : ''));
+      return existingUrl;
     }
+    // 終日イベントは重複チェックしない（同日に同名予定が複数登録されるケースは少ない）
+    calendar.createAllDayEvent(title, date, options);
     console.log('カレンダー登録完了:', title + (guests ? ' / 招待=' + guests : ''));
-  } catch (err) { console.error('addToCalendar error:', err.message); }
+    return '';
+  } catch (err) { console.error('addToCalendar error:', err.message); return ''; }
 }
 
 function addTaskToCalendar(task) {
@@ -1972,6 +2183,12 @@ function linkGroupToProject(groupId, projectName) {
 }
 
 function getProjectNameByGroupId(groupId) {
+  if (!groupId) return null;
+  // 案件グループ(新・1案件複数グループ対応)を優先。未整備/未一致なら従来の施主/業者2列にフォールバック＝非破壊。
+  try {
+    var viaGroups = pmGetProjectNameByGroupIdFromGroups(groupId);
+    if (viaGroups) return viaGroups;
+  } catch (e) { /* 案件グループ未整備でも従来動作を維持 */ }
   var sheet = getSheet('プロジェクト管理');
   if (!sheet) return null;
   var data  = sheet.getDataRange().getValues();
@@ -1997,7 +2214,12 @@ function detectProjectFromRecentLogs(groupId) {
   return null;
 }
 
-function registerNewProject(projectName, groupId) {
+// skipDriveFolder=true のとき Driveフォルダを作らない。
+//   PM（プロジェクト進捗管理）経由の新規案件は pmEnsureProjectFolder() が
+//   「プロジェクト管理/{案件ID}_{案件名}/[01_見積..]」の正規フォルダを1つだけ作るため、
+//   ここでのフラットなフォルダ作成（重複の原因）を抑止する。
+//   既存のタスク自動登録(writeTask)等から呼ばれる場合は従来どおりフォルダを作成する。
+function registerNewProject(projectName, groupId, skipDriveFolder) {
   var sheet = getSheet('プロジェクト管理');
   if (!sheet) return;
   var data  = sheet.getDataRange().getValues();
@@ -2005,8 +2227,10 @@ function registerNewProject(projectName, groupId) {
     if (data[i][1] === projectName || data[i][0] === projectName) return;
   }
   sheet.appendRow([projectName, projectName, groupId || '', '', '進行中', '自動登録', '', '']);
-  var config = getConfig();
-  if (config.DRIVE_FOLDER_ID) getOrCreateFolder(config.DRIVE_FOLDER_ID, projectName);
+  if (!skipDriveFolder) {
+    var config = getConfig();
+    if (config.DRIVE_FOLDER_ID) getOrCreateFolder(config.DRIVE_FOLDER_ID, projectName);
+  }
   console.log('新規プロジェクト登録:', projectName);
 }
 
@@ -2795,6 +3019,160 @@ function handleCompletion(text, memberName, replyToken) {
   sendLineReply(replyToken, '✅ 完了を記録いたしました。お疲れ様でございます。\n案件：' + target.project + '\nタスク：' + target.content);
 }
 
+// ---- タスク一覧のタップ完了（quickReplyボタン） ----
+function isTaskListRequest(text) {
+  if (!text) return false;
+  return ['残タスク', 'タスク一覧', '未完了タスク'].some(function(k) { return text.includes(k); });
+}
+
+// 未完了タスク行を取得（memberName指定でその担当分に絞る）。task_id欠損の古い行はその場で採番して書き戻す
+function collectOpenTasks(memberName) {
+  var sheet = getSheet('タスク管理');
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+  var data  = sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues();
+  var clean = (memberName || '').replace('さん', '').trim();
+  var out   = [];
+  for (var i = 0; i < data.length; i++) {
+    var st = String(data[i][5] || '');
+    if (st === 'done' || st === '完了') continue;
+    if (!data[i][2]) continue;
+    if (clean && !String(data[i][3] || '').includes(clean)) continue;
+    var id = String(data[i][0] || '');
+    if (!id) { id = generateId(); sheet.getRange(i + 2, 1).setValue(id); }
+    out.push({ taskId: id, project: String(data[i][1] || '未分類'), content: String(data[i][2] || ''), assignee: String(data[i][3] || ''), deadline: data[i][4] });
+  }
+  return out;
+}
+
+// 「残タスクは？」→ 番号付き一覧＋タップで完了できるボタン（quickReplyは最大13件）
+function handleTaskListWithButtons(replyToken, memberName) {
+  var tasks = collectOpenTasks(memberName);
+  var scope = memberName ? memberName.replace('さん', '') + 'さん' : '全体';
+  if (!tasks.length && memberName) { tasks = collectOpenTasks(null); scope = '全体'; }
+  if (!tasks.length) { sendLineReply(replyToken, '✅ 未完了のタスクはございません。'); return; }
+
+  var lines = ['【' + scope + 'の未完了タスク】\n下のボタンをタップすると完了にできます。'];
+  tasks.forEach(function(t, i) {
+    var dl = t.deadline ? Utilities.formatDate(new Date(t.deadline), 'Asia/Tokyo', 'M/d') : '期日未定';
+    lines.push((i + 1) + '. [' + t.project + '] ' + t.content + '（' + (t.assignee ? t.assignee + '・' : '') + dl + '）');
+  });
+  if (tasks.length > 13) lines.push('※ボタンは先頭13件のみです。完了後にもう一度「残タスク」とお送りください。');
+  var pageUrl = tasksPageUrl_(memberName);
+  if (pageUrl) lines.push('\n📱 まとめて完了はタスク画面から：\n' + pageUrl);
+
+  var items = tasks.slice(0, 13).map(function(t, i) {
+    var label = '✅' + (i + 1) + ' ' + t.content;
+    if (label.length > 20) label = label.slice(0, 19) + '…';
+    return { type: 'action', action: {
+      type: 'postback', label: label,
+      data: 'action=task_done&id=' + encodeURIComponent(t.taskId),
+      displayText: '「' + t.content.slice(0, 30) + '」を完了にします',
+    } };
+  });
+  sendQuickReply(replyToken, lines.join('\n'), items);
+}
+
+// タスク画面（?page=tasks）のURL。DASHBOARD_TOKEN設定時は key 付き、
+// who指定時はその人のタスクに初期絞り込みされる
+function tasksPageUrl_(who) {
+  try {
+    var url = ScriptApp.getService().getUrl();
+    if (!url) return '';
+    var token = String(PropertiesService.getScriptProperties().getProperty('DASHBOARD_TOKEN') || '').trim();
+    var q = url + '?page=tasks' + (token ? '&key=' + encodeURIComponent(token) : '');
+    var name = String(who || '').replace('さん', '').trim();
+    if (name) q += '&who=' + encodeURIComponent(name);
+    return q;
+  } catch (e) { return ''; }
+}
+
+// 各画面のURL（page='' で進捗ボード）。DASHBOARD_TOKEN設定時は key 付き。
+function dashboardPageUrl_(page) {
+  try {
+    var url = ScriptApp.getService().getUrl();
+    if (!url) return '';
+    var token = String(PropertiesService.getScriptProperties().getProperty('DASHBOARD_TOKEN') || '').trim();
+    var q = url + (page ? '?page=' + page : '?page=board');
+    if (token) q += '&key=' + encodeURIComponent(token);
+    return q;
+  } catch (e) { return ''; }
+}
+
+// 「URL」「進捗ボード」等 → 各画面URLの案内を返す
+function isDashboardUrlRequest(text) {
+  if (!text) return false;
+  var t = String(text).trim();
+  if (/^(url|ｕｒｌ|ＵＲＬ|link|リンク)$/i.test(t)) return true;
+  // 「進捗ボードのURL」「ボード開いて」「管理画面のリンク」等
+  if (/(url|ｕｒｌ|ＵＲＬ|リンク|開き|ひらき|ちょうだい|教え|おしえ)/i.test(t) &&
+      /(進捗|ボード|管理画面|ダッシュ|請求|入金|タスク画面)/.test(t)) return true;
+  return false;
+}
+
+// 「ここに進捗アラート」「放置アラートをここに」等 → 送信先変更コマンド判定
+function isSetProgressAlertHereRequest(text) {
+  if (!text) return false;
+  var t = String(text).trim();
+  var hasAlert = /(放置|進捗)?(アラート|通知|リマインド)/.test(t);
+  var hasHere  = /(ここ|こちら|このグループ)/.test(t);
+  var hasSet   = /(に|へ|にして|送|設定|変更|登録)/.test(t);
+  return hasAlert && hasHere && hasSet;
+}
+
+// このグループを放置アラート（進捗）の通知先として登録
+function handleSetProgressAlertHere(replyToken, groupId) {
+  if (!groupId) { sendLineReply(replyToken, 'グループ／ルーム内で送ってください（個人トークでは設定できません）。'); return; }
+  var res = pmSetRoleGroupId('進捗', groupId, 'LINEで設定');
+  if (!res.ok) { sendLineReply(replyToken, '設定に失敗しました：' + (res.msg || '不明なエラー')); return; }
+  // スクリプトプロパティが設定されているとシートより優先されるため注意喚起
+  var propOverride = String(PropertiesService.getScriptProperties().getProperty('PROGRESS_GROUP_ID') || '').trim();
+  var note = propOverride
+    ? '\n\n⚠️ ただし現在スクリプトプロパティ PROGRESS_GROUP_ID が設定されており、そちらが優先されます。切り替えを有効にするにはこの設定を解除してください。'
+    : '';
+  sendLineReply(replyToken,
+    '✅ このグループを放置アラートの通知先に登録しました。\n今後の放置アラートはここに届きます。' + note);
+}
+
+// 進捗ボード／タスク／請求・入金 の各URLをまとめて返信
+function handleDashboardUrlRequest(replyToken, who) {
+  var board   = dashboardPageUrl_('');
+  var tasks   = tasksPageUrl_(who);
+  var billing = dashboardPageUrl_('billing');
+  if (!board) { sendLineReply(replyToken, 'URLを取得できませんでした。ウェブアプリのデプロイ状態をご確認ください。'); return; }
+  var lines = [
+    '🗂 WOODBASE 各画面のURLです。',
+    '',
+    '📋 進捗ボード',
+    board,
+    '',
+    '🧾 請求・入金',
+    billing,
+  ];
+  if (tasks) { lines.push('', '✅ タスク', tasks); }
+  sendLineReply(replyToken, lines.join('\n'));
+}
+
+// タップ完了 postback（action=task_done&id=<task_id>）
+function handleTaskDonePostback(ev, params) {
+  var taskId = decodeURIComponent(params.id || '');
+  if (!taskId) { sendLineReply(ev.replyToken, 'タスクを特定できませんでした。'); return; }
+  var sheet = getSheet('タスク管理');
+  if (!sheet || sheet.getLastRow() <= 1) { sendLineReply(ev.replyToken, 'タスクが見つかりませんでした。'); return; }
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]) !== taskId) continue;
+    var st = String(data[i][5] || '');
+    if (st === 'done' || st === '完了') {
+      sendLineReply(ev.replyToken, '✅ このタスクは既に完了しています。\nタスク：' + data[i][2]);
+      return;
+    }
+    sheet.getRange(i + 2, 6).setValue('done');
+    sendLineReply(ev.replyToken, '✅ 完了を記録いたしました。お疲れ様でございます。\n案件：' + (data[i][1] || '未分類') + '\nタスク：' + data[i][2]);
+    return;
+  }
+  sendLineReply(ev.replyToken, 'タスクが見つかりませんでした（削除済みの可能性がございます）。');
+}
+
 function shouldSkipExtraction(text) {
   if (!text || text.length <= 3) return true;
   if (!/[ぁ-んァ-ヶー一-龯a-zA-Z0-9]/.test(text)) return true;
@@ -2834,6 +3212,26 @@ function isDuplicateTask(content, assignee, groupId) {
     if (row[3] !== assignee) continue;
     var normExist = String(row[2]).replace(/\s/g, '').slice(0, 30);
     if (normNew === normExist) return true;
+  }
+  return false;
+}
+
+// 同グループ・同タイトル・同日付の予定が既にスケジュール管理シートにあるか確認
+//   スケジュールは「重複防止」が無かったため、再送・連投で二重登録＋二重DM＋二重カレンダーが起きていた。
+//   列: [0]=登録日時, [1]=案件名, [2]=予定タイトル, [3]=日付, ... [9]=グループID
+function isDuplicateSchedule(title, date, groupId) {
+  var sheet = getSheet('スケジュール管理');
+  if (!sheet || sheet.getLastRow() <= 1) return false;
+  var data    = sheet.getDataRange().getValues();
+  var normNew = String(title || '').replace(/\s/g, '');
+  var dnew    = String(date || '').slice(0, 10);
+  if (!normNew || !dnew) return false; // タイトルか日付が無ければ判定不可（重複扱いしない）
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    if (String(row[9] || '') !== String(groupId)) continue;
+    var rowDate = row[3] instanceof Date ? fmtDate(row[3]) : String(row[3] || '').slice(0, 10);
+    if (rowDate !== dnew) continue;
+    if (String(row[2] || '').replace(/\s/g, '') === normNew) return true;
   }
   return false;
 }
@@ -3046,6 +3444,31 @@ function sendLineMessage(targetId, text) {
   } catch (err) { console.error('sendLineMessage error:', err.message); }
 }
 
+// メンション付きプッシュ（textV2）。text内の {who} がメンションに置き換わる。
+// mentionUserId が無い（メンバー管理に未登録等）場合は名前入りの通常テキストで送る。
+function sendLineMentionMessage(targetId, text, mentionUserId, fallbackName) {
+  if (!targetId) return;
+  if (!mentionUserId) {
+    sendLineMessage(targetId, text.split('{who}').join(fallbackName || '担当者'));
+    return;
+  }
+  var config = getConfig();
+  try {
+    UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'post', muteHttpExceptions: true,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.LINE_CHANNEL_ACCESS_TOKEN },
+      payload: JSON.stringify({
+        to: targetId,
+        messages: [{
+          type: 'textV2',
+          text: text.length > 4900 ? text.slice(0, 4900) + '…' : text,
+          substitution: { who: { type: 'mention', mentionee: { type: 'user', userId: mentionUserId } } },
+        }],
+      }),
+    });
+  } catch (err) { console.error('sendLineMentionMessage error:', err.message); }
+}
+
 // ==========================================
 // SECTION 19: ユーティリティ
 // ==========================================
@@ -3108,9 +3531,10 @@ function setup() {
     mem.appendRow(['織田', 'Uxxxxxxxxxx', '社内', '', '']);
   }
 
+  // 案件ID列＝projects と二面一体化するリンクキー（フェーズ1）。右端へ非破壊追加。
   setupSheet(ss, 'プロジェクト管理',
-    ['略称', '正式名称', 'グループID（施主）', 'グループID（業者）', 'ステータス', '備考', '会社名', '住所'],
-    '#F6B26B', [80, 200, 180, 180, 80, 200, 150, 250]);
+    ['略称', '正式名称', 'グループID（施主）', 'グループID（業者）', 'ステータス', '備考', '会社名', '住所', '案件ID'],
+    '#F6B26B', [80, 200, 180, 180, 80, 200, 150, 250, 100]);
   var proj = getSheet('プロジェクト管理');
   if (proj.getLastRow() <= 1) proj.appendRow(['雨晴れ', '雨のち晴れクリニック', '', '', '進行中', '']);
 
@@ -3125,6 +3549,12 @@ function setup() {
   setupSheet(ss, '完了タスク',
     ['タスクID', '案件名', 'タスク内容', '担当者', '期日', 'ステータス', '作成日時', 'グループID', '緊急度', '完了日時'],
     '#B7B7B7', [120, 160, 280, 100, 100, 80, 140, 160, 80, 140]);
+
+  // プロジェクト進捗管理シート（projects / project_logs / 他）を非破壊で作成
+  try { pmSetupSheets(); } catch (e) { console.error('pmSetupSheets:', e.message); }
+
+  // スプレッドシートの表示整頓（ダッシュボード・表示/非表示・projects装飾）。冪等。
+  try { pmOrganizeSpreadsheet(); } catch (e) { console.error('pmOrganizeSpreadsheet:', e.message); }
 
   try {
     SpreadsheetApp.getUi().alert(
@@ -3217,7 +3647,10 @@ function createTriggers() {
   ScriptApp.newTrigger('archiveCompletedTasks').timeBased().onWeekDay(ScriptApp.WeekDay.SUNDAY).atHour(23).create();
   ScriptApp.newTrigger('sendDailyScheduleNotification').timeBased().everyDays(1).atHour(9).create();
 
-  SpreadsheetApp.getUi().alert('完了：\n・毎朝9時 タスクリマインド＋前日通知\n・毎朝9時 日次予定通知（進捗管理グループ）\n・毎週月曜8時 週次レポート\n・毎週日曜23時 完了タスクアーカイブ');
+  // プロジェクト進捗管理のアラート（放置/請求漏れ/入金未確認）を毎朝9時に登録
+  try { pmSetupTriggers(); } catch (e) { console.error('pmSetupTriggers:', e.message); }
+
+  SpreadsheetApp.getUi().alert('完了：\n・毎朝9時 タスクリマインド＋前日通知\n・毎朝9時 日次予定通知（進捗管理グループ）\n・毎朝9時 案件アラート（放置/請求漏れ/入金未確認）\n・毎週月曜8時 週次レポート\n・毎週日曜23時 完了タスクアーカイブ');
 }
 
 // ==========================================
@@ -3569,13 +4002,14 @@ function archiveOldMessageLog() {
 
 // ==========================================
 // SECTION 23: 日次予定通知（毎朝9時 → 進捗管理グループ）
-// 送信先: Script Property DAILY_NOTIFY_GROUP_ID で上書き可
+// 送信先: ① Script Property DAILY_NOTIFY_GROUP_ID ② 社内グループシート（役割「日次通知」） ③ 既定値
 // ==========================================
 
 var DAILY_NOTIFY_GROUP_ID_DEFAULT = 'Cc9886c70f353c706b76991070c3695bc';
 
 function getDailyNotifyGroupId() {
-  return PropertiesService.getScriptProperties().getProperty('DAILY_NOTIFY_GROUP_ID') || DAILY_NOTIFY_GROUP_ID_DEFAULT;
+  var byRole = (typeof pmRoleGroupId === 'function') ? pmRoleGroupId('日次通知') : '';
+  return PropertiesService.getScriptProperties().getProperty('DAILY_NOTIFY_GROUP_ID') || byRole || DAILY_NOTIFY_GROUP_ID_DEFAULT;
 }
 
 // 診断：毎朝9時の自動送信が「実際に動く状態か」を確認する（送信はしない）。

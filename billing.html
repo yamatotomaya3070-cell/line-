@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>WOODBASE 請求・入金</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 4px 12px rgba(16,24,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo,sans-serif;}
+  header{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;letter-spacing:.02em}
+  header .count{color:var(--muted);font-size:13px}
+  header .sp{flex:1}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:10px;
+    padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;text-decoration:none;display:inline-block}
+  .btn:hover{background:#f0f1f3}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{opacity:.9}
+  .search{border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13px;min-width:220px}
+  .wrap{padding:18px 20px 40px;max-width:1100px;margin:0 auto}
+  .hint{font-size:12.5px;color:var(--muted);margin:0 0 12px}
+  .tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px;min-width:760px}
+  th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
+  th{font-size:12px;color:var(--muted);font-weight:600;background:#fafbfc;position:sticky;top:0}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:#f9fafb}
+  td .pname{font-weight:700}
+  td .client{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .phase{display:inline-block;font-size:11.5px;background:#eef2ff;color:#3730a3;border-radius:8px;padding:3px 8px}
+  .badge{display:inline-block;font-size:11.5px;border-radius:8px;padding:3px 8px}
+  .badge.done{background:#dcfce7;color:#166534}
+  .badge.pending{background:#fee2e2;color:#991b1b}
+  .badge.none{background:#f1f2f4;color:var(--muted)}
+  .dt{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .smallbtn{font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);cursor:pointer;white-space:nowrap;margin-top:6px;display:inline-block}
+  .smallbtn:hover{background:#f0f1f3}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:28px 10px}
+  .state{padding:60px 20px;text-align:center;color:var(--muted)}
+  /* modal */
+  .mask{position:fixed;inset:0;background:rgba(17,24,39,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+  .mask.on{display:flex}
+  .modal{background:#fff;border-radius:16px;width:100%;max-width:420px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .modal h3{margin:0 0 14px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+  .field input{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:10px;font-size:14px}
+  .modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;
+    padding:10px 18px;border-radius:30px;font-size:13px;opacity:0;transition:.25s;z-index:30}
+  .toast.on{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>WOODBASE 請求・入金</h1>
+  <span class="count" id="count">読み込み中…</span>
+  <span class="sp"></span>
+  <input class="search" id="q" placeholder="案件名・クライアントで絞り込み">
+  <button class="btn" id="reload">↻ 更新</button>
+  <a class="btn" href="<?= boardUrl ?>" target="_top">📊 進捗ボードへ</a>
+  <a class="btn" href="<?= tasksUrl ?>" target="_top">📋 タスク</a>
+</header>
+
+<div class="wrap">
+  <p class="hint">ここで入力した請求・入金は<strong>承認待ちに登録</strong>され、経理の承認後にシートへ反映されます（即時反映はされません）。</p>
+  <div class="tablewrap" id="tablewrap"><div class="state">読み込み中…</div></div>
+</div>
+
+<div class="mask" id="amountMask">
+  <div class="modal">
+    <h3 id="amount_title">金額を入力</h3>
+    <p style="font-size:12.5px;color:var(--muted);margin:-6px 0 14px">
+      ここで入力した内容はすぐには反映されません。承認待ちに登録され、承認後に確定します。
+    </p>
+    <div class="field"><label>案件</label><div id="amount_projectName" style="font-weight:700;font-size:14px"></div></div>
+    <div class="field"><label>金額（円）</label><input id="amount_value" type="number" inputmode="numeric" placeholder="例：500000"></div>
+    <div class="field"><label id="amount_dueLabel">予定日</label><input id="amount_due" type="date"></div>
+    <div class="field"><label id="amount_doneLabel">確定日</label><input id="amount_done" type="date"></div>
+    <div class="field"><label>申請者名（必須）</label><input id="amount_requester" placeholder="例：田中"></div>
+    <div class="row">
+      <button class="btn" id="amount_cancel">キャンセル</button>
+      <button class="btn primary" id="amount_save">承認待ちに申請する</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  var DATA = { phases: [], projects: [] };
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function toast(m){ var t=document.getElementById('toast'); t.textContent=m; t.classList.add('on'); setTimeout(function(){t.classList.remove('on');},1800); }
+
+  function load(){
+    var wrap=document.getElementById('tablewrap');
+    wrap.innerHTML = '<div class="state">読み込み中…</div>';
+    var done=false;
+    var t=setTimeout(function(){ if(!done) wrap.innerHTML='<div class="state">⏳ サーバー応答がありません（10秒）。<br>ページを強制再読み込み（Ctrl+Shift+R）してみてください。</div>'; },10000);
+    google.script.run
+      .withSuccessHandler(function(d){ done=true; clearTimeout(t); try{ DATA=d; render(); }catch(err){ wrap.innerHTML='<div class="state">表示エラー：'+esc(err&&err.message?err.message:err)+'</div>'; } })
+      .withFailureHandler(function(e){ done=true; clearTimeout(t); wrap.innerHTML='<div class="state">読み込みに失敗：'+esc(e&&e.message?e.message:e)+'</div>'; })
+      .appGetBillingData();
+  }
+
+  // ステータス文言に「済」を含めば完了扱い（請求済/入金済 等）。未請求/未入金はpending。
+  function statusBadge(value){
+    if(!value) return '<span class="badge none">未設定</span>';
+    var cls = value.indexOf('済') !== -1 ? 'badge done' : 'badge pending';
+    return '<span class="'+cls+'">'+esc(value)+'</span>';
+  }
+  function dateLines(due, done, dueLabel, doneLabel){
+    var out='';
+    if(due)  out += '<div class="dt">'+esc(dueLabel)+'：'+esc(due)+'</div>';
+    if(done) out += '<div class="dt">'+esc(doneLabel)+'：'+esc(done)+'</div>';
+    return out;
+  }
+
+  function render(){
+    var q = document.getElementById('q').value.trim();
+    var list = DATA.projects.slice();
+    if(q){
+      list = list.filter(function(p){
+        return (p.name||'').indexOf(q)!==-1 || (p.client||'').indexOf(q)!==-1;
+      });
+    }
+    // フェーズ順→案件名順で並べる（ボードと同じ並び感覚）
+    var order = {};
+    DATA.phases.forEach(function(ph,i){ order[ph]=i; });
+    list.sort(function(a,b){
+      var d = (order[a.phase]!=null?order[a.phase]:99) - (order[b.phase]!=null?order[b.phase]:99);
+      return d !== 0 ? d : String(a.name).localeCompare(String(b.name),'ja');
+    });
+
+    document.getElementById('count').textContent = '案件 '+list.length+'件（社内・取消は非表示）';
+
+    if(!list.length){
+      document.getElementById('tablewrap').innerHTML = '<div class="empty">対象の案件がありません</div>';
+      return;
+    }
+    var html = '<table><thead><tr>'
+      + '<th>案件</th><th>フェーズ</th><th>請求</th><th>入金</th>'
+      + '</tr></thead><tbody>';
+    list.forEach(function(p){
+      html += '<tr>'
+        + '<td><div class="pname">'+esc(p.name||'(無名)')+'</div>'
+        +   (p.client?'<div class="client">🏢 '+esc(p.client)+'</div>':'')+'</td>'
+        + '<td><span class="phase">'+esc(p.phase)+'</span></td>'
+        + '<td>'+statusBadge(p.billingStatus)+dateLines(p.billingDue, p.billingDone, '予定', '請求済')
+        +   '<button class="smallbtn" data-act="bill" data-id="'+esc(p.id)+'" data-name="'+esc(p.name)+'" title="請求を入力（承認待ちに登録）">🧾 請求</button></td>'
+        + '<td>'+statusBadge(p.paymentStatus)+dateLines(p.paymentDue, p.paymentDone, '予定', '確認')
+        +   '<button class="smallbtn" data-act="payment" data-id="'+esc(p.id)+'" data-name="'+esc(p.name)+'" title="入金を入力（承認待ちに登録）">💰 入金</button></td>'
+        + '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('tablewrap').innerHTML = html;
+  }
+
+  document.getElementById('tablewrap').addEventListener('click', function(e){
+    var el = e.target;
+    if(el.dataset.act==='bill')    openAmountModal('billing', el.dataset.id, el.dataset.name);
+    if(el.dataset.act==='payment') openAmountModal('payment', el.dataset.id, el.dataset.name);
+  });
+  document.getElementById('q').addEventListener('input', render);
+  document.getElementById('reload').addEventListener('click', load);
+
+  // 請求/入金 共通入力モーダル（承認待ちへの申請のみ・確定はしない）
+  var AMOUNT_KIND_CONF = {
+    billing: { title:'請求を入力', dueLabel:'請求予定日', doneLabel:'請求済日（すでに請求済みの場合のみ）',
+               fn:'appSubmitBillingRequest', label:'請求' },
+    payment: { title:'入金を入力', dueLabel:'入金予定日', doneLabel:'入金確認日（すでに入金確認済みの場合のみ）',
+               fn:'appSubmitPaymentRequest', label:'入金' },
+  };
+  var amountTarget = { id:null, kind:null };
+  function openAmountModal(kind, id, name){
+    amountTarget = { id:id, kind:kind };
+    var conf = AMOUNT_KIND_CONF[kind];
+    document.getElementById('amount_title').textContent = conf.title;
+    document.getElementById('amount_dueLabel').textContent = conf.dueLabel;
+    document.getElementById('amount_doneLabel').textContent = conf.doneLabel;
+    document.getElementById('amount_projectName').textContent = name;
+    document.getElementById('amount_value').value = '';
+    document.getElementById('amount_due').value = '';
+    document.getElementById('amount_done').value = '';
+    document.getElementById('amount_requester').value = localStorage.getItem('wb_requester_name') || '';
+    document.getElementById('amountMask').classList.add('on');
+  }
+  function closeAmountModal(){ document.getElementById('amountMask').classList.remove('on'); }
+  document.getElementById('amount_cancel').addEventListener('click', closeAmountModal);
+  document.getElementById('amountMask').addEventListener('click', function(e){ if(e.target.id==='amountMask') closeAmountModal(); });
+  document.getElementById('amount_save').addEventListener('click', function(){
+    var requester = document.getElementById('amount_requester').value.trim();
+    if(!requester){ toast('申請者名は必須です'); return; }
+    localStorage.setItem('wb_requester_name', requester);
+    var payload = {
+      amount:   document.getElementById('amount_value').value,
+      dueDate:  document.getElementById('amount_due').value,
+      doneDate: document.getElementById('amount_done').value,
+      requester: requester,
+    };
+    var conf = AMOUNT_KIND_CONF[amountTarget.kind];
+    google.script.run.withSuccessHandler(function(r){
+      if(r.ok){ toast(conf.label+'を承認待ちに登録しました（承認後に反映）'); closeAmountModal(); load(); }
+      else { toast(r.msg||'登録失敗'); }
+    }).withFailureHandler(function(e){ toast('登録失敗：'+e.message); })[conf.fn](amountTarget.id, payload);
+  });
+
+  load();
+</script>
+</body>
+</html>

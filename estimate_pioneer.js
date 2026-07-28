@@ -1,5 +1,6 @@
 // ============================================================
-// パイオニア什器：制作一覧（完了行）→ 店舗別 見積書 自動作成
+// パイオニア什器：制作一覧 → 店舗別 見積書 自動作成
+// ※「状況」列は見積とは無関係（店舗名のある全行が対象）
 // ------------------------------------------------------------
 // ★ 既存のLINEチャットボット処理／既存 estimate.js とは完全に独立。
 //   - doPost / 署名検証 / handleEvent / handleDM には一切手を加えない。
@@ -15,7 +16,6 @@ var EST_PIONEER = {
   TEMPLATE_SS_ID:  '1AITs5qf2A3-y5LLHN9hYi1mB4iWZ52F6FwyoIBBr2-s', // 見積書テンプレート
   TEMPLATE_SHEET:  '原本',  // テンプレ(マスター)シート名。実体は『原本』だった。
   TAX_RATE:        0.10,
-  STATUS_DONE:     '完了',
   UNIT_LABEL:      '台',
   OUTPUT_FOLDER_ID: '',  // 空ならマイドライブ直下に出力。フォルダ指定したい場合はIDを入れる。
   TZ:              'Asia/Tokyo',
@@ -25,13 +25,14 @@ var EST_PIONEER = {
 // SECTION: メイン処理（手動実行）
 // ============================================================
 // 本番：全店舗ぶんの見積書（シート）を作成
-function createEstimateSheets() { return runEstimateCore_(Infinity); }
+function createEstimateSheets() { return runEstimateCore_(Infinity, ''); }
 
 // テスト：先頭1店舗だけ作成（本番前の動作確認用。プルダウンに表示される）
-function runEstimateTestOneStore() { return runEstimateCore_(1); }
+function runEstimateTestOneStore() { return runEstimateCore_(1, ''); }
 
-function runEstimateCore_(maxStores) {
-  var log = { created: 0, stores: 0, detailRows: 0, skipped: 0, files: [] };
+// requestText: LINEメッセージ等。制作一覧に存在する店舗名が含まれていれば、その店舗だけ作成する。
+function runEstimateCore_(maxStores, requestText) {
+  var log = { created: 0, stores: 0, detailRows: 0, skipped: 0, files: [], error: '', note: '', requestedStores: [] };
 
   // 1〜2. 参照元スプレッドシート／制作一覧シートを開く
   var srcSheet;
@@ -39,27 +40,64 @@ function runEstimateCore_(maxStores) {
     var srcSs = SpreadsheetApp.openById(EST_PIONEER.SOURCE_SS_ID);
     srcSheet = srcSs.getSheetByName(EST_PIONEER.SOURCE_SHEET);
   } catch (e) {
-    console.error('❌ 参照元スプレッドシートを開けません: ' + e.message);
-    return;
+    log.error = '参照元スプレッドシートを開けません: ' + e.message;
+    console.error('❌ ' + log.error);
+    return log;
   }
   if (!srcSheet) {
-    console.error('❌ 「' + EST_PIONEER.SOURCE_SHEET + '」シートが見つかりません。');
-    return;
+    log.error = '「' + EST_PIONEER.SOURCE_SHEET + '」シートが見つかりません。';
+    console.error('❌ ' + log.error);
+    return log;
   }
 
-  // 3〜5. ヘッダー自動判定 → 状況=完了 抽出 → 店舗名空欄スキップ
+  // 3〜5. ヘッダー自動判定 → 店舗名あり行を抽出 → 店舗名空欄スキップ
   var extracted = getEstimateSourceRows_(srcSheet);
   if (extracted.missingCols.length) {
-    console.error('❌ 必須列が見つかりません: ' + extracted.missingCols.join(' / '));
-    return;
+    log.error = '必須列が見つかりません: ' + extracted.missingCols.join(' / ');
+    console.error('❌ ' + log.error);
+    return log;
   }
   log.skipped = extracted.skipped;
-  if (!extracted.rows.length) {
-    console.log('対象（状況=完了）の行が0件のため、見積書は作成しませんでした。スキップ行数: ' + log.skipped);
-    return;
+
+  // 店舗指定（メッセージに制作一覧上の店舗名が含まれていればその店舗だけ対象にする）
+  var requested = findRequestedStores_(requestText, extracted.allStores);
+  log.requestedStores = requested;
+
+  var targetRows = extracted.rows;
+  if (!targetRows.length) {
+    log.note = '制作一覧に店舗名の入った行が0件のため、見積書は作成しませんでした。スキップ行数: ' + log.skipped;
+    console.log(log.note);
+    return log;
   }
   // 6. 店舗名ごとにグループ化
-  var allGroups = groupEstimateRowsByStore_(extracted.rows);
+  var allGroups = groupEstimateRowsByStore_(targetRows);
+
+  // 店舗指定らしき語（「〇〇店」）があるのに一致しなかった場合は、
+  // 意図しない全店舗作成をせず、候補一覧を返して止める
+  if (!requested.length) {
+    var hinted = extractStoreHints_(requestText);
+    if (hinted.length) {
+      var candidateStores = allGroups.map(function (g) { return g.store; });
+      log.note = '店舗「' + hinted.join('、') + '」が制作一覧の「店舗名」と一致しませんでした。\n' +
+                 '登録のある店舗：' + (candidateStores.length ? candidateStores.join('、') : '（なし）') + '\n' +
+                 '上記の店舗名で再送してください。';
+      console.log(log.note);
+      return log;
+    }
+  }
+  if (requested.length) {
+    var availableStores = allGroups.map(function (g) { return g.store; });
+    var want = {};
+    requested.forEach(function (s) { want[normCmp_(s)] = true; });
+    allGroups = allGroups.filter(function (g) { return want[normCmp_(g.store)]; });
+    if (!allGroups.length) {
+      log.note = '指定された店舗（' + requested.join('、') + '）の行が制作一覧に見つからないため、見積書は作成しませんでした。\n' +
+                 '登録のある店舗：' + (availableStores.length ? availableStores.join('、') : '（なし）');
+      console.log(log.note);
+      return log;
+    }
+    console.log('★店舗指定：' + requested.join('、') + ' のみ作成します');
+  }
   var groups = isFinite(maxStores) ? allGroups.slice(0, maxStores) : allGroups;
   if (isFinite(maxStores)) console.log('★テストモード：先頭 ' + groups.length + ' 店舗のみ作成します（全 ' + allGroups.length + ' 店舗中）');
   log.stores = groups.length;
@@ -85,15 +123,16 @@ function runEstimateCore_(maxStores) {
 
   // 12. ログ出力
   logEstimateResult_(log);
+  return log;
 }
 
 // ============================================================
 // SECTION: 制作一覧 読み取り
 // ============================================================
-// 状況=完了 かつ 店舗名あり の行を、ヘッダー名ベースで抽出。
+// 店舗名あり の行を、ヘッダー名ベースで抽出（「状況」列は見積とは無関係）。
 // 戻り値: { rows:[...], skipped:Number, missingCols:[String] }
 function getEstimateSourceRows_(sheet) {
-  if (sheet.getLastRow() < 2) return { rows: [], skipped: 0, missingCols: [] };
+  if (sheet.getLastRow() < 2) return { rows: [], skipped: 0, missingCols: [], allStores: [] };
 
   var values = sheet.getDataRange().getValues();
   var headerRow = findHeaderRowIndex_(values);
@@ -124,22 +163,26 @@ function getEstimateSourceRows_(sheet) {
     sAmount: col('P指値(金額)'),
     unit:    col('単価'),
     amount:  col('金額'),
-    status:  col('状況'),
   };
 
-  // 必須列チェック（D/W/Hは任意、それ以外は必須）
-  var required = { 店舗名: c.store, '理/美': c.rimei, 什器名: c.name, 台数: c.qty, 単価: c.unit, 金額: c.amount, 状況: c.status };
+  // 必須列チェック（D/W/H・状況は任意、それ以外は必須）
+  var required = { 店舗名: c.store, '理/美': c.rimei, 什器名: c.name, 台数: c.qty, 単価: c.unit, 金額: c.amount };
   var missing = [];
   Object.keys(required).forEach(function (k) { if (required[k] === -1) missing.push(k); });
-  if (missing.length) return { rows: [], skipped: 0, missingCols: missing };
+  if (missing.length) return { rows: [], skipped: 0, missingCols: missing, allStores: [] };
 
-  var rows = [], skipped = 0;
+  var rows = [], skipped = 0, allStores = [], storeSeen = {};
   for (var r = headerRow + 1; r < values.length; r++) {
     var row = values[r];
-    var status = normCmp_(row[c.status]);
-    if (status !== EST_PIONEER.STATUS_DONE) { continue; }   // 完了以外はスキップ（カウントしない）
     var store = String(row[c.store] == null ? '' : row[c.store]).trim();
-    if (!store) { skipped++; continue; }                    // 店舗名空欄はスキップ
+    // 店舗名の全量リスト（LINEの店舗指定判定に使う）
+    if (store && !storeSeen[store]) { storeSeen[store] = true; allStores.push(store); }
+    // 「状況」列は見積とは無関係。店舗名のある全行が対象。
+    if (!store) {
+      // 内容があるのに店舗名だけ空欄の行をカウント（完全な空行は数えない）
+      if (String(row[c.name] == null ? '' : row[c.name]).trim()) skipped++;
+      continue;
+    }
 
     rows.push({
       store:   store,
@@ -155,7 +198,65 @@ function getEstimateSourceRows_(sheet) {
       amount:  toNum_(row[c.amount]),
     });
   }
-  return { rows: rows, skipped: skipped, missingCols: [] };
+  return { rows: rows, skipped: skipped, missingCols: [], allStores: allStores };
+}
+
+// メッセージ内に含まれる店舗名を、制作一覧の店舗名リストから抽出する。
+// 「九条店」のように末尾に「店」を付けた表記でも一致するようにする。
+// 長い店舗名から順に照合し、一致した部分はテキストから除去する
+// （例：「西新宿」を含むメッセージで、別店舗の「新宿」まで誤一致するのを防ぐ）。
+// 完全包含で一致しない場合は、「〇〇店」の〇〇が店舗名の一部に一致するかで再照合する
+// （例：メッセージ「九条店」⇔ シート「イオンモール九条」）。
+function findRequestedStores_(text, storeList) {
+  if (!text || !storeList || !storeList.length) return [];
+  var t = normCmp_(text);
+  var sorted = storeList.slice().sort(function (a, b) {
+    return normCmp_(b).length - normCmp_(a).length;
+  });
+  var found = {};
+  sorted.forEach(function (store) {
+    var s = normCmp_(store);
+    if (!s) return;
+    var hit = '';
+    if (t.indexOf(s) !== -1) {
+      hit = s;
+    } else {
+      var stripped = s.replace(/店$/, '');
+      if (stripped && stripped !== s && t.indexOf(stripped) !== -1) hit = stripped;
+    }
+    if (hit) {
+      found[store] = true;
+      t = t.split(hit).join('　');  // 一致部分を除去し、より短い店舗名の重複一致を防ぐ
+    }
+  });
+  var exact = storeList.filter(function (store) { return found[store] === true; });
+  if (exact.length) return exact;
+
+  // フォールバック：「〇〇店」の〇〇を含む店舗名を探す
+  var hints = extractStoreHints_(text);
+  if (!hints.length) return [];
+  return storeList.filter(function (store) {
+    var s = normCmp_(store);
+    return hints.some(function (h) { return s.indexOf(h) !== -1; });
+  });
+}
+
+// メッセージ中の「〇〇店」という表記から店舗名候補（〇〇の部分）を抜き出す。
+// 「1店舗」「全店」などの一般表現や、コマンド語を含むものは除外する。
+function extractStoreHints_(text) {
+  if (!text) return [];
+  var t = normCmp_(text);
+  var hints = [], m;
+  var re = /([^\s、。,．・のをはがで「」()（）]{1,15})店/g;
+  while ((m = re.exec(t)) !== null) {
+    var h = m[1];
+    // 先頭に付いたコマンド語・冠語を除去（「パイオニア九条店」→「九条」）
+    h = h.replace(/^(パイオニア|プラージュ|理容|美容|什器|見積書|見積|指定)+/, '');
+    if (!h) continue;
+    if (/^[0-9一二三四五六七八九十全各当支本]+$/.test(h)) continue;  // 「1店舗」「全店」等
+    if (hints.indexOf(h) === -1) hints.push(h);
+  }
+  return hints;
 }
 
 // 「店舗名」を含む行をヘッダー行とみなす（先頭10行以内）。無ければ0行目。
@@ -571,21 +672,68 @@ function logEstimateResult_(log) {
 // ============================================================
 function handleEstimateCommand(event, messageText) {
   if (!isPioneerEstimateCommand_(messageText)) return false;
+  var reply;
   try {
-    createEstimateSheets();
-    if (event && event.replyToken && typeof sendLineReply === 'function') {
-      sendLineReply(event.replyToken, '見積書の自動作成を実行しました。詳細はGASの実行ログをご確認ください。');
-    }
+    var isTest = isPioneerEstimateTestCommand_(messageText);
+    // メッセージに店舗名が含まれていれば、その店舗だけ作成される
+    var log = runEstimateCore_(isTest ? 1 : Infinity, messageText);
+    reply = formatPioneerEstimateReply_(log, isTest);
   } catch (e) {
-    if (event && event.replyToken && typeof sendLineReply === 'function') {
-      sendLineReply(event.replyToken, '⚠️ 見積書作成中にエラーが発生しました: ' + e.message);
-    }
+    console.error('handleEstimateCommand error: ' + e.message + ' ' + (e.stack || ''));
+    reply = '⚠️ 見積書作成中にエラーが発生しました: ' + e.message;
+  }
+  if (event && event.replyToken && typeof sendLineReply === 'function') {
+    sendLineReply(event.replyToken, reply);
   }
   return true;
 }
+
+// 「パイオニア 見積…作って」等で発火。照会・進捗質問では発火しない（作成動詞が必須）。
 function isPioneerEstimateCommand_(text) {
   if (!text) return false;
-  return /パイオニア.*見積|見積.*パイオニア|什器.*見積書/.test(String(text));
+  var t = String(text);
+  if (!/パイオニア|什器/.test(t)) return false;   // 対象が明示されていること
+  if (!/見積/.test(t)) return false;
+  // 作成系の動詞があるときだけ（「どうなってる？」等の進捗質問では発火させない）
+  return /(作って|作成|作っといて|つくって|生成|出して|お願い)/.test(t);
+}
+
+// テスト指定（先頭1店舗だけ作成）。「テスト」「お試し」「1店舗」等を含むとき。
+function isPioneerEstimateTestCommand_(text) {
+  if (!text) return false;
+  return /テスト|ﾃｽﾄ|お試し|おためし|1店舗|一店舗|試し/.test(String(text));
+}
+
+// 実行結果(log)をLINE返信用テキストに整形
+function formatPioneerEstimateReply_(log, isTest) {
+  if (!log)      return '⚠️ 見積書作成の結果を取得できませんでした。GASの実行ログをご確認ください。';
+  if (log.error) return '⚠️ 見積書を作成できませんでした：\n' + log.error;
+  if (!log.created) {
+    return 'ℹ️ ' + (log.note || '対象行が見つからず、見積書は作成されませんでした。');
+  }
+  var lines = [];
+  lines.push((isTest ? '【テスト】' : '') + 'パイオニア什器の見積書を作成しました。');
+  lines.push('');
+  if (log.requestedStores && log.requestedStores.length) {
+    lines.push('指定店舗：' + log.requestedStores.join('、'));
+  }
+  lines.push('作成件数：' + log.created + '件');
+  lines.push('対象店舗数：' + log.stores + '店舗');
+  lines.push('明細行数：' + log.detailRows + '行');
+  if (log.skipped) lines.push('スキップ：' + log.skipped + '行（店舗名空欄）');
+  if (log.files && log.files.length) {
+    lines.push('');
+    lines.push('作成シート：');
+    log.files.slice(0, 20).forEach(function (f) { lines.push('・' + f.store + '（' + f.name + '）'); });
+    if (log.files.length > 20) lines.push('…ほか ' + (log.files.length - 20) + ' 件');
+    var baseUrl = String(log.files[0].url || '').split('#')[0];
+    if (baseUrl) { lines.push(''); lines.push('見積書：' + baseUrl); }
+  }
+  if (isTest) {
+    lines.push('');
+    lines.push('※テスト実行（先頭1店舗のみ）。全店舗作成するには「パイオニア 見積書作って」と送ってください。');
+  }
+  return lines.join('\n');
 }
 
 // ============================================================

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>WOODBASE 進捗ボード</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 4px 12px rgba(16,24,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo,sans-serif;}
+  header{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;letter-spacing:.02em}
+  header .count{color:var(--muted);font-size:13px}
+  header .sp{flex:1}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:10px;
+    padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+  .btn:hover{background:#f0f1f3}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{opacity:.9}
+  .board{display:flex;gap:14px;padding:18px 20px 40px;overflow-x:auto;align-items:flex-start;min-height:60vh}
+  .col{flex:0 0 280px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 110px)}
+  .col-head{padding:12px 14px;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;
+    border-top:3px solid var(--accent);position:sticky;top:0;background:var(--panel)}
+  .col-head .dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+  .col-head .n{margin-left:auto;color:var(--muted);font-weight:600;font-size:12px;
+    background:#f1f2f4;border-radius:20px;padding:1px 9px}
+  .cards{padding:10px;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+  .card{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff;transition:.15s;cursor:default}
+  .card:hover{box-shadow:var(--shadow);transform:translateY(-1px)}
+  .card .name{font-weight:700;font-size:14px;line-height:1.35;margin-bottom:6px}
+  .card .meta{font-size:12px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .card .meta b{color:#374151;font-weight:600}
+  .chip{display:inline-block;font-size:11.5px;background:#eef2ff;color:#3730a3;border-radius:8px;padding:3px 8px}
+  .chip.due{background:#fef3c7;color:#92400e}
+  .chip.date{background:#e0f2fe;color:#075985}
+  .chip.status{background:#f3e8ff;color:#6b21a8;font-weight:600}
+  .chip.prog{background:#dcfce7;color:#166534;font-weight:600}
+  .rowchips{margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px}
+  .note{font-size:11.5px;color:var(--muted);margin:2px 0 8px;line-height:1.4;white-space:pre-wrap}
+  .drivelink{font-size:12px;color:#2563eb;text-decoration:none;padding:5px 8px;border:1px solid var(--line);border-radius:8px;white-space:nowrap;
+    font-family:inherit;background:#fff;cursor:pointer}
+  .drivelink:hover{background:#eff6ff}
+  .card .foot{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .card select{flex:1;font-size:12px;padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+  .card input.assignee{flex:1;font-size:12px;padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);min-width:0}
+  .card input.assignee:focus{outline:2px solid #93c5fd}
+  .x{border:none;background:none;color:#9aa1ab;cursor:pointer;font-size:13px;padding:4px 6px;border-radius:8px}
+  .x:hover{background:#fde8e8;color:#c0392b}
+  .empty{color:var(--muted);font-size:12px;text-align:center;padding:18px 6px}
+  .state{padding:60px 20px;text-align:center;color:var(--muted)}
+  /* modal */
+  .mask{position:fixed;inset:0;background:rgba(17,24,39,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+  .mask.on{display:flex}
+  .modal{background:#fff;border-radius:16px;width:100%;max-width:420px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .modal h3{margin:0 0 14px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+  .field input,.field select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:10px;font-size:14px}
+  .modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;
+    padding:10px 18px;border-radius:30px;font-size:13px;opacity:0;transition:.25s;z-index:30}
+  .toast.on{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>WOODBASE 進捗ボード</h1>
+  <span class="count" id="count">読み込み中…</span>
+  <span class="sp"></span>
+  <a class="btn" href="<?= tasksUrl ?>" target="_top">📋 タスク</a>
+  <a class="btn" href="<?= billingUrl ?>" target="_top">🧾 請求・入金</a>
+  <button class="btn" id="whoBtn" title="更新者として記録される名前（クリックで変更）">👤 名前を設定</button>
+  <button class="btn" id="reload">↻ 更新</button>
+  <button class="btn primary" id="add">＋ 案件追加</button>
+</header>
+
+<div id="board" class="board"><div class="state">読み込み中…</div></div>
+
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3>新規案件を追加</h3>
+    <div class="field"><label>案件名（必須）</label><input id="f_name" placeholder="例：〇〇ホテル客室改装"></div>
+    <div class="field"><label>クライアント名</label><input id="f_client"></div>
+    <div class="field"><label>担当者</label><input id="f_assignee"></div>
+    <div class="field"><label>フェーズ</label><select id="f_phase"></select></div>
+    <div class="row">
+      <button class="btn" id="cancel">キャンセル</button>
+      <button class="btn primary" id="save">追加する</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  var PHASE_COLORS = ['#2563eb','#7c3aed','#d97706','#ea580c','#16a34a','#0891b2','#db2777'];
+  var DATA = { phases: [], projects: [] };
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function toast(m){ var t=document.getElementById('toast'); t.textContent=m; t.classList.add('on'); setTimeout(function(){t.classList.remove('on');},1800); }
+
+  function load(){
+    var board=document.getElementById('board');
+    board.innerHTML = '<div class="state">読み込み中…</div>';
+    var done=false;
+    var t=setTimeout(function(){ if(!done) board.innerHTML='<div class="state">⏳ サーバー応答がありません（10秒）。<br>ページを強制再読み込み（Ctrl+Shift+R）してみてください。</div>'; },10000);
+    google.script.run
+      .withSuccessHandler(function(d){ done=true; clearTimeout(t); try{ DATA=d; render(); }catch(err){ board.innerHTML='<div class="state">表示エラー：'+esc(err&&err.message?err.message:err)+'</div>'; } })
+      .withFailureHandler(function(e){ done=true; clearTimeout(t); board.innerHTML='<div class="state">読み込みに失敗：'+esc(e&&e.message?e.message:e)+'</div>'; })
+      .appGetData();
+  }
+
+  function render(){
+    var phases = DATA.phases, projects = DATA.projects;
+    document.getElementById('count').textContent = '案件 '+projects.length+'件（社内・取消は非表示）';
+    var byPhase = {};
+    phases.forEach(function(p){ byPhase[p]=[]; });
+    projects.forEach(function(p){ (byPhase[p.phase]||(byPhase[p.phase]=[])).push(p); });
+
+    var html = '';
+    phases.forEach(function(ph, i){
+      var color = PHASE_COLORS[i % PHASE_COLORS.length];
+      var items = byPhase[ph]||[];
+      html += '<div class="col" style="--accent:'+color+'">';
+      html += '<div class="col-head"><span class="dot"></span>'+esc(ph)+'<span class="n">'+items.length+'</span></div>';
+      html += '<div class="cards">';
+      if(!items.length){ html += '<div class="empty">案件なし</div>'; }
+      items.forEach(function(p){
+        html += card(p, phases);
+      });
+      html += '</div></div>';
+    });
+    document.getElementById('board').innerHTML = html;
+  }
+
+  function card(p, phases){
+    var meta = '';
+    if(p.client)   meta += '<span>🏢 <b>'+esc(p.client)+'</b></span>';
+    var act = '';
+    if(p.status)     act += '<span class="chip status">● '+esc(p.status)+'</span>';
+    if(p.phase==='施工' && p.progress!=='') act += ' <span class="chip prog">🏗 '+esc(p.progress)+'%</span>';
+    if(p.nextAction) act += ' <span class="chip">▶ '+esc(p.nextAction)+'</span>';
+    if(p.nextDue)    act += ' <span class="chip due">⏰ '+esc(p.nextDue)+'</span>';
+
+    var dates = '';
+    if(p.meetingDate) dates += '<span class="chip date">🤝 '+esc(p.meetingDate)+'</span>';
+    if(p.startDue)    dates += ' <span class="chip date">🔨 '+esc(p.startDue)+'</span>';
+    if(p.deliveryDue) dates += ' <span class="chip date">📦 '+esc(p.deliveryDue)+'</span>';
+
+    var noteText = p.note && p.note.length > 60 ? p.note.slice(0, 60) + '…' : p.note;
+    var note = noteText ? '<div class="note">📝 '+esc(noteText)+'</div>' : '';
+    var drive = p.driveUrl
+      ? '<a class="drivelink" href="'+esc(p.driveUrl)+'" target="_blank" rel="noopener">📁 Drive</a>'
+      : '<button class="drivelink" data-act="drive" data-id="'+esc(p.id)+'" title="既存のDriveフォルダを探して開く">📁 Drive</button>';
+
+    var opts = phases.map(function(ph){ return '<option'+(ph===p.phase?' selected':'')+'>'+esc(ph)+'</option>'; }).join('');
+
+    // 現在フェーズのサブステータス選択（マスタPM_PHASESから）
+    var stList = (DATA.statusMaster && DATA.statusMaster[p.phase]) || [];
+    var stSel = '';
+    if(stList.length){
+      var stOpts = '<option value=""'+(p.status?'':' selected')+'>— 状況を選ぶ —</option>'
+        + stList.map(function(s){ return '<option'+(s===p.status?' selected':'')+'>'+esc(s)+'</option>'; }).join('');
+      stSel = '<select data-act="status" data-id="'+esc(p.id)+'" title="サブステータス">'+stOpts+'</select>';
+    }
+    // 施工フェーズのみ進捗％（10%刻み）
+    var progSel = '';
+    if(p.phase==='施工'){
+      var cur = p.progress===''? -1 : Number(p.progress);
+      var pOpts = '<option value=""'+(cur<0?' selected':'')+'>進捗％</option>';
+      for(var pc=0; pc<=100; pc+=10){ pOpts += '<option value="'+pc+'"'+(pc===cur?' selected':'')+'>'+pc+'%</option>'; }
+      progSel = '<select data-act="progress" data-id="'+esc(p.id)+'" title="施工進捗％" style="flex:0 0 84px">'+pOpts+'</select>';
+    }
+    var subFoot = (stSel||progSel) ? '<div class="foot">'+stSel+progSel+'</div>' : '';
+
+    var assigneeInput = '<div class="foot">👤 <input type="text" class="assignee" data-act="assignee" data-id="'+esc(p.id)+'" '
+      + 'data-orig="'+esc(p.assignee)+'" value="'+esc(p.assignee)+'" placeholder="担当者未設定" title="担当者（変更すると自動保存）"></div>';
+
+    return '<div class="card" data-id="'+esc(p.id)+'">'
+      + '<div class="name">'+esc(p.name||'(無名)')+'</div>'
+      + (meta?'<div class="meta">'+meta+'</div>':'')
+      + assigneeInput
+      + (act?'<div class="rowchips">'+act+'</div>':'')
+      + (dates?'<div class="rowchips">'+dates+'</div>':'')
+      + note
+      + subFoot
+      + '<div class="foot"><select data-act="phase" data-id="'+esc(p.id)+'">'+opts+'</select>'
+      + drive
+      + '<button class="x" data-act="archive" data-id="'+esc(p.id)+'" title="取り消し（アーカイブ）">取消</button></div>'
+      + '</div>';
+  }
+
+  // 更新者名（最終更新者に記録）。billingページと同じキーを共用し、初回だけ入力してもらう。
+  function whoName(){
+    var w = (localStorage.getItem('wb_requester_name')||'').trim();
+    if(!w){
+      w = (prompt('お名前を入力してください（更新した人として記録されます）')||'').trim();
+      if(w){ localStorage.setItem('wb_requester_name', w); updateWhoBtn(); }
+    }
+    return w;
+  }
+  function updateWhoBtn(){
+    var w = (localStorage.getItem('wb_requester_name')||'').trim();
+    document.getElementById('whoBtn').textContent = '👤 ' + (w || '名前を設定');
+  }
+  document.getElementById('whoBtn').addEventListener('click', function(){
+    var cur = (localStorage.getItem('wb_requester_name')||'').trim();
+    var w = (prompt('お名前（更新者として記録されます）', cur)||'').trim();
+    if(w){ localStorage.setItem('wb_requester_name', w); updateWhoBtn(); toast('名前を保存しました：'+w); }
+  });
+  updateWhoBtn();
+
+  // イベント委譲（GASサンドボックスでは inline onclick が使えないため）
+  document.getElementById('board').addEventListener('change', function(e){
+    var el = e.target;
+    if(el.dataset.act==='phase'){
+      var id = el.dataset.id, phase = el.value;
+      google.script.run.withSuccessHandler(function(r){ toast(r.ok?'フェーズを更新しました':'更新失敗'); load(); })
+        .withFailureHandler(function(){ toast('更新失敗'); }).appSetPhase(id, phase, whoName());
+    }
+    if(el.dataset.act==='status'){
+      google.script.run.withSuccessHandler(function(r){ toast(r.ok?'状況を更新しました':(r.msg||'更新失敗')); load(); })
+        .withFailureHandler(function(){ toast('更新失敗'); }).appSetStatus(el.dataset.id, el.value, whoName());
+    }
+    if(el.dataset.act==='progress'){
+      if(el.value==='') return;
+      google.script.run.withSuccessHandler(function(r){ toast(r.ok?'進捗を更新しました':(r.msg||'更新失敗')); load(); })
+        .withFailureHandler(function(){ toast('更新失敗'); }).appSetProgress(el.dataset.id, el.value, whoName());
+    }
+  });
+  // 担当者入力：フォーカスが外れた時（Enterでも即blur）に変更があれば保存
+  document.getElementById('board').addEventListener('focusout', function(e){
+    var el = e.target;
+    if(el.dataset.act!=='assignee') return;
+    var val = el.value.trim();
+    if(val === (el.dataset.orig||'')) return;
+    el.dataset.orig = val;
+    google.script.run.withSuccessHandler(function(r){ toast(r.ok?'担当者を更新しました':(r.msg||'更新失敗')); })
+      .withFailureHandler(function(){ toast('更新失敗'); }).appSetAssignee(el.dataset.id, val, whoName());
+  });
+  document.getElementById('board').addEventListener('keydown', function(e){
+    if(e.target.dataset && e.target.dataset.act==='assignee' && e.key==='Enter'){ e.target.blur(); }
+  });
+  document.getElementById('board').addEventListener('click', function(e){
+    var el = e.target;
+    if(el.dataset.act==='archive'){
+      var id = el.dataset.id;
+      if(confirm('この案件をボードから取り消します（アーカイブ）。よろしいですか？')){
+        google.script.run.withSuccessHandler(function(r){ toast(r.ok?'取り消しました':(r.msg||'失敗')); load(); })
+          .withFailureHandler(function(){ toast('失敗'); }).appArchiveProject(id, whoName());
+      }
+    }
+    if(el.dataset.act==='drive'){
+      var did = el.dataset.id;
+      // ポップアップブロック回避：クリック直後（同期）に空タブを開いておき、URL取得後にそこへ移動する
+      // （新規フォルダは作らず、既存のDriveフォルダを探して開くだけ）
+      var win = window.open('', '_blank');
+      el.disabled = true; el.textContent = '📁 探索中…';
+      google.script.run
+        .withSuccessHandler(function(r){
+          el.disabled=false; el.textContent='📁 Drive';
+          if(r.ok){ if(win) win.location = r.url; }
+          else { toast(r.msg||'失敗'); if(win) win.close(); }
+        })
+        .withFailureHandler(function(){ toast('失敗'); if(win) win.close(); el.disabled=false; el.textContent='📁 Drive'; })
+        .appGetDriveUrl(did);
+    }
+  });
+
+  // 追加モーダル
+  function openModal(){
+    var sel=document.getElementById('f_phase');
+    sel.innerHTML = DATA.phases.map(function(p){return '<option>'+esc(p)+'</option>';}).join('');
+    document.getElementById('f_name').value='';
+    document.getElementById('f_client').value='';
+    document.getElementById('f_assignee').value='';
+    document.getElementById('mask').classList.add('on');
+  }
+  function closeModal(){ document.getElementById('mask').classList.remove('on'); }
+  document.getElementById('add').addEventListener('click', openModal);
+  document.getElementById('cancel').addEventListener('click', closeModal);
+  document.getElementById('mask').addEventListener('click', function(e){ if(e.target.id==='mask') closeModal(); });
+  document.getElementById('reload').addEventListener('click', load);
+  document.getElementById('save').addEventListener('click', function(){
+    var name=document.getElementById('f_name').value.trim();
+    if(!name){ toast('案件名は必須です'); return; }
+    var payload={ name:name, client:document.getElementById('f_client').value.trim(),
+      assignee:document.getElementById('f_assignee').value.trim(), phase:document.getElementById('f_phase').value,
+      who:whoName() };
+    google.script.run.withSuccessHandler(function(r){
+      if(r.ok){ toast('追加しました（'+r.id+'）'); closeModal(); load(); } else { toast(r.msg||'追加失敗'); }
+    }).withFailureHandler(function(e){ toast('追加失敗：'+e.message); }).appAddProject(payload);
+  });
+
+  load();
+</script>
+</body>
+</html>

@@ -38,7 +38,7 @@ function countFiles(folder, email, callback) {
 
 // ② オーナー移行を実行（新アカウントのメールを入力してから実行）
 function transferOwnershipToNewAccount() {
-  var NEW_ACCOUNT_EMAIL = 'woodbasegroup@gmail.com';
+  var NEW_ACCOUNT_EMAIL = 'admin@woodbasef.com';
 
   if (!NEW_ACCOUNT_EMAIL) {
     console.log('❌ NEW_ACCOUNT_EMAIL を入力してから実行してください');

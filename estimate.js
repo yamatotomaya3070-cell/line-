@@ -11,7 +11,14 @@ var ESTIMATE_LINK_SETTING_SHEET = '見積連携設定';
 var ESTIMATE_RATE_SHEET         = '見積単価設定';
 var ESTIMATE_CONFIRM_SHEET      = '見積要確認';
 
-var ESTIMATE_LINK_HEADERS    = ['設定ID','表示名','工程管理表ID','工程シート名','見積書ID','テンプレートシート名','担当者表示','単価','有効','備考'];
+// 見積プロファイル（＝従来「見積連携設定」を拡張）。列はヘッダー名で参照するため、
+// 末尾追加は ensureEstimateLinkSettingsSheet が右端へ非破壊で足す（既存運用そのまま）。
+//  - トリガーキーワード: 「パイオニア,什器」等のカンマ区切り。発火判定の外部化用（フェーズ1で利用）
+//  - レイアウト方式: 'auto'(ヘッダー自動検出) / 'fixed'(座標固定)。空=従来挙動
+//  - 税率: 空なら TAX_RATE(0.10)
+//  - 紐付けプロジェクトID: projects の案件IDを指定すると「案件→プロファイル」解決が可能（無ければ会社単位にフォールバック）
+//  - 発行方式: '月別'(対象月で工程を絞る=東邦) / '完了行一括'(完了行をまとめて発行=パイオニア)。空=月別
+var ESTIMATE_LINK_HEADERS    = ['設定ID','表示名','工程管理表ID','工程シート名','見積書ID','テンプレートシート名','担当者表示','単価','有効','備考','トリガーキーワード','レイアウト方式','税率','明細単位','注記文言','出力先フォルダID','紐付けプロジェクトID','発行方式'];
 var ESTIMATE_RATE_HEADERS    = ['設定ID','分類','条件キーワード','単価','単位','備考'];
 var ESTIMATE_CONFIRM_HEADERS = ['作成日時','設定ID','対象シート名','物件','図面名','分類','理由'];
 
@@ -37,11 +44,13 @@ var COVER_SUBTOTAL_VALUE_COL = 9;
 
 // 2ページ目以降（明細）
 // テンプレ構造: 行44-52がページヘッダー、行53〜84が page2 明細領域
-// 行85-93が page3 ヘッダー、行94以降が page3 明細領域（要確認）
+// 行85-91が page3 ヘッダー、行92〜126が page3 明細領域
+// 4ページ目以降は page3 ブロック（行85〜126）を複製して自動追加する
 var DETAIL_START_ROW      = 53;
 var DETAIL_PAGE2_END_ROW  = 84;
 var DETAIL_PAGE3_START_ROW = 92;
 var DETAIL_PAGE3_END_ROW  = 126;
+var DETAIL_PAGE_BLOCK_START = 85;  // page3ブロック先頭（ページヘッダー行を含む）
 var DETAIL_COL_NO         = 1;
 var DETAIL_COL_NAME       = 2;
 var DETAIL_COL_QTY        = 6;
@@ -105,6 +114,15 @@ function getEstimateLinkSettings() {
   var iPrice   = col('単価');
   var iEnabled = col('有効');
   var iNote    = col('備考');
+  // 見積プロファイル拡張列（未設定＝-1なら従来挙動のデフォルトを適用）
+  var iTrigger = col('トリガーキーワード');
+  var iLayout  = col('レイアウト方式');
+  var iTax     = col('税率');
+  var iUnit    = col('明細単位');
+  var iNoteTxt = col('注記文言');
+  var iOutDir  = col('出力先フォルダID');
+  var iProjId  = col('紐付けプロジェクトID');
+  var iIssue   = col('発行方式');
 
   var rows = [];
   for (var i = 1; i < data.length; i++) {
@@ -126,6 +144,17 @@ function getEstimateLinkSettings() {
       unitPrice:             price,
       enabled:               true,
       note:                  iNote !== -1 ? String(r[iNote] || '').trim() : '',
+      // ---- 見積プロファイル拡張（フェーズ1の est_core 統合で使用。現状は読み取りのみ・挙動不変） ----
+      triggerKeywords: iTrigger !== -1
+        ? String(r[iTrigger] || '').split(/[,、\s]+/).map(function(x){ return x.trim(); }).filter(Boolean)
+        : [],
+      layoutMode:   iLayout  !== -1 ? (String(r[iLayout] || '').trim() || '') : '',
+      taxRate:      (iTax !== -1 && r[iTax] !== '' && !isNaN(Number(r[iTax]))) ? Number(r[iTax]) : TAX_RATE,
+      detailUnit:   iUnit    !== -1 ? String(r[iUnit] || '').trim() : '',
+      noteText:     iNoteTxt !== -1 ? String(r[iNoteTxt] || '').trim() : '',
+      outputFolderId: iOutDir !== -1 ? String(r[iOutDir] || '').trim() : '',
+      projectId:    iProjId  !== -1 ? String(r[iProjId] || '').trim() : '',
+      issueMode:    (iIssue !== -1 && String(r[iIssue] || '').trim()) ? String(r[iIssue]).trim() : '月別',
       // 後方互換（既存コード参照用エイリアス）
       name:          name,
       processSsId:   String(r[iProcSs] || '').trim(),
@@ -578,7 +607,11 @@ function writeEstimateCover(targetSheet, estimateData, setting, year, month) {
   // A5: 対象月（例: 5月）
   if (month) targetSheet.getRange('A5').setValue(month);
 
-  var startRow = COVER_ITEM_START_ROW;
+  var startRow  = COVER_ITEM_START_ROW;
+  var amountCol = estimateColumnLetter(DETAIL_COL_AMOUNT);
+  if (estimateData.properties.length > COVER_MAX_ROWS) {
+    console.warn('物件数が1ページ目の上限(' + COVER_MAX_ROWS + '行)を超えています。超過分は1ページ目に載らず小計にも含まれません。');
+  }
   estimateData.properties.forEach(function(p, i){
     if (i >= COVER_MAX_ROWS) return;
     var row = startRow + i;
@@ -586,60 +619,134 @@ function writeEstimateCover(targetSheet, estimateData, setting, year, month) {
     targetSheet.getRange(row, COVER_COL_NAME).setValue(p.coverName);
     targetSheet.getRange(row, COVER_COL_QTY).setValue(1);
     targetSheet.getRange(row, COVER_COL_UNIT).setValue('式');
-    targetSheet.getRange(row, COVER_COL_AMOUNT).setValue(p.amount);
+    // 物件ごとの金額＝明細ページの該当行を =SUM で参照（明細未記入の物件のみ値を直接入れる）
+    var amountCell = targetSheet.getRange(row, COVER_COL_AMOUNT);
+    if (p.detailRanges && p.detailRanges.length) {
+      var refs = p.detailRanges.map(function(s){
+        return amountCol + s.from + ':' + amountCol + s.to;
+      });
+      amountCell.setFormula('=SUM(' + refs.join(',') + ')');
+    } else {
+      amountCell.setValue(p.amount);
+    }
     targetSheet.getRange(row, COVER_COL_NOTE).setValue(i === 0 ? (setting.assigneeLabel || '') : '同上');
   });
 }
 
+// 列番号 → 列レター（9 → 'I'）
+function estimateColumnLetter(col) {
+  var s = '';
+  while (col > 0) {
+    var m = (col - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    col = Math.floor((col - 1) / 26);
+  }
+  return s;
+}
+
+// 明細の書込に必要な行数（物件見出し1行＋明細行＋物件間の空行1行）
+function countDetailRowsNeeded(estimateData) {
+  return estimateData.properties.reduce(function(s, p){
+    return s + 1 + p.detailItems.length + 1;
+  }, 0);
+}
+
+// 明細ページ領域の一覧を返す。page2+page3 で足りなければ page3 ブロック
+// （行85〜126：ページヘッダー含む）をシート末尾に複製して4ページ目以降を追加する。
+// ※明細書込前（テンプレが未記入の状態）に呼ぶこと。
+function buildDetailPages(targetSheet, rowsNeeded) {
+  var pages = [
+    { start: DETAIL_START_ROW,       end: DETAIL_PAGE2_END_ROW },
+    { start: DETAIL_PAGE3_START_ROW, end: DETAIL_PAGE3_END_ROW },
+  ];
+  var capacity = pages.reduce(function(s, p){ return s + (p.end - p.start + 1); }, 0);
+
+  var blockStart   = DETAIL_PAGE_BLOCK_START;
+  var blockSize    = DETAIL_PAGE3_END_ROW - blockStart + 1;
+  var headerOffset = DETAIL_PAGE3_START_ROW - blockStart;
+  var lastEnd      = DETAIL_PAGE3_END_ROW;
+
+  while (capacity < rowsNeeded) {
+    var newStart = lastEnd + 1;
+    var newEnd   = newStart + blockSize - 1;
+    if (targetSheet.getMaxRows() < newEnd) {
+      targetSheet.insertRowsAfter(targetSheet.getMaxRows(), newEnd - targetSheet.getMaxRows());
+    }
+    targetSheet.getRange(blockStart, 1, blockSize, targetSheet.getMaxColumns())
+               .copyTo(targetSheet.getRange(newStart, 1));
+    for (var i = 0; i < blockSize; i++) {
+      targetSheet.setRowHeight(newStart + i, targetSheet.getRowHeight(blockStart + i));
+    }
+    pages.push({ start: newStart + headerOffset, end: newEnd });
+    capacity += blockSize - headerOffset;
+    lastEnd = newEnd;
+  }
+  return pages;
+}
+
+// 明細を書き込み、各物件が使った金額セルの行範囲を p.detailRanges に記録する
+// （1ページ目の物件別金額を =SUM(...) で参照するため）
 function writeEstimateDetails(targetSheet, estimateData, setting) {
-  // page2: 53-84, page3: 94-125 を書込領域として、ページヘッダー行はスキップ
-  var rowState = { row: DETAIL_START_ROW, pageEnd: DETAIL_PAGE2_END_ROW, nextStart: DETAIL_PAGE3_START_ROW, nextEnd: DETAIL_PAGE3_END_ROW, overflow: false };
+  var pages = buildDetailPages(targetSheet, countDetailRowsNeeded(estimateData));
+  var pageIdx  = 0;
+  var row      = pages[0].start;
+  var overflow = false;
 
   function advance() {
-    rowState.row++;
-    if (rowState.row > rowState.pageEnd) {
-      if (rowState.nextStart) {
-        rowState.row     = rowState.nextStart;
-        rowState.pageEnd = rowState.nextEnd;
-        rowState.nextStart = null;
+    row++;
+    if (row > pages[pageIdx].end) {
+      pageIdx++;
+      if (pageIdx < pages.length) {
+        row = pages[pageIdx].start;
       } else {
-        rowState.overflow = true;
+        overflow = true;
       }
     }
   }
 
+  var skippedWrites = 0;  // 領域不足で書けなかった行数（0なら末尾の空行分だけの超過＝正常）
   estimateData.properties.forEach(function(p, pIdx){
-    if (rowState.overflow) return;
+    if (overflow) { skippedWrites += 1 + p.detailItems.length; return; }
     // 物件見出し
-    targetSheet.getRange(rowState.row, DETAIL_COL_NO).setValue(pIdx + 1);
-    targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setValue(p.property);
+    targetSheet.getRange(row, DETAIL_COL_NO).setValue(pIdx + 1);
+    targetSheet.getRange(row, DETAIL_COL_NAME).setValue(p.property);
     advance();
-    var seqInProperty = 0;
+    var segments = [];  // 金額列の連続行範囲（ページを跨ぐと分割）
     p.detailItems.forEach(function(d){
-      if (rowState.overflow) return;
-      seqInProperty++;
-      targetSheet.getRange(rowState.row, DETAIL_COL_NAME).setValue(d.name);
-      targetSheet.getRange(rowState.row, DETAIL_COL_QTY).setValue(d.qty === '' ? '' : d.qty);
-      targetSheet.getRange(rowState.row, DETAIL_COL_UNIT).setValue(d.unit || '');
-      targetSheet.getRange(rowState.row, DETAIL_COL_UNITPRICE).setValue(d.unitPrice === '' ? '' : d.unitPrice);
-      targetSheet.getRange(rowState.row, DETAIL_COL_AMOUNT).setValue(d.amount || '');
+      if (overflow) { skippedWrites++; return; }
+      targetSheet.getRange(row, DETAIL_COL_NAME).setValue(d.name);
+      targetSheet.getRange(row, DETAIL_COL_QTY).setValue(d.qty === '' ? '' : d.qty);
+      targetSheet.getRange(row, DETAIL_COL_UNIT).setValue(d.unit || '');
+      targetSheet.getRange(row, DETAIL_COL_UNITPRICE).setValue(d.unitPrice === '' ? '' : d.unitPrice);
+      targetSheet.getRange(row, DETAIL_COL_AMOUNT).setValue(d.amount || '');
+      var last = segments[segments.length - 1];
+      if (last && last.to === row - 1) last.to = row;
+      else segments.push({ from: row, to: row });
       advance();
     });
+    p.detailRanges = segments;
     advance(); // 物件間の空行
   });
 
-  if (rowState.overflow) {
-    console.warn('明細件数が page2+page3 の領域を超えました。テンプレを拡張してください。');
+  if (skippedWrites > 0) {
+    console.warn('明細' + skippedWrites + '行がページ領域を超えて書き込めませんでした（ページ自動追加後も不足）。buildDetailPages を確認してください。');
   }
 }
 
 // 合計反映：テンプレ行10（税込合計/消費税/合計＝小計）と 1ページ目下部の小計（行43）
+// すべて数式で入れる（明細を手修正しても合計が自動で追従する）
 function writeEstimateTotals(targetSheet, estimateData) {
-  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_TAXINCL).setValue(estimateData.total);
-  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_TAX).setValue(estimateData.tax);
-  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_SUBTOTAL).setValue(estimateData.subtotal);
-  // 1ページ目下部の小計
-  targetSheet.getRange(COVER_SUBTOTAL_ROW, COVER_SUBTOTAL_VALUE_COL).setValue(estimateData.subtotal);
+  var coverCol    = estimateColumnLetter(COVER_COL_AMOUNT);
+  var coverRange  = coverCol + COVER_ITEM_START_ROW + ':' + coverCol + (COVER_ITEM_START_ROW + COVER_MAX_ROWS - 1);
+  var subtotalRef = estimateColumnLetter(COVER_SUBTOTAL_VALUE_COL) + COVER_SUBTOTAL_ROW;
+  var taxRef      = estimateColumnLetter(TOTAL_COL_TAX) + TOTAL_ROW;
+
+  // 1ページ目下部の小計（行43）＝ 物件別金額（I14:I41）の =SUM
+  targetSheet.getRange(COVER_SUBTOTAL_ROW, COVER_SUBTOTAL_VALUE_COL).setFormula('=SUM(' + coverRange + ')');
+  // 行10：合計(=小計)／消費税／税込合計
+  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_SUBTOTAL).setFormula('=' + subtotalRef);
+  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_TAX).setFormula('=ROUND(' + subtotalRef + '*' + TAX_RATE + ')');
+  targetSheet.getRange(TOTAL_ROW, TOTAL_COL_TAXINCL).setFormula('=' + subtotalRef + '+' + taxRef);
 }
 
 function writeEstimateConfirmItems(confirmItems, targetSheetName) {
@@ -700,8 +807,9 @@ function createEstimateFromProcessSheet(setting, year, month, overwrite) {
   var copyRes = copyEstimateTemplateSheet(setting.estimateSpreadsheetId, setting.templateSheetName, sheetName, overwrite);
   var target  = copyRes.sheet;
 
-  writeEstimateCover(target, data, setting, year, month);
+  // 明細を先に書く（各物件の明細行範囲を確定させ、1ページ目の金額を =SUM で参照するため）
   writeEstimateDetails(target, data, setting);
+  writeEstimateCover(target, data, setting, year, month);
   writeEstimateTotals(target, data);
   writeEstimateConfirmItems(data.confirmItems, sheetName);
 

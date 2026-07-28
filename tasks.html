@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>WOODBASE タスク</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 4px 12px rgba(16,24,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo,sans-serif;
+    padding-bottom:86px}
+  header{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0}
+  header .count{color:var(--muted);font-size:12.5px}
+  header .sp{flex:1}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:10px;
+    padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;text-decoration:none}
+  .btn:hover{background:#f0f1f3}
+  .chips{display:flex;gap:8px;padding:12px 16px 4px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .chips .chip{flex:0 0 auto;border:1px solid var(--line);background:#fff;border-radius:20px;
+    padding:8px 15px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap}
+  .chips .chip .n{font-size:11px;opacity:.75;margin-left:3px}
+  .chips .chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .chips .chip.over{border-color:#fca5a5;color:#b91c1c}
+  .chips .chip.over.on{background:#b91c1c;color:#fff;border-color:#b91c1c}
+  .list{padding:4px 16px 10px}
+  .ghead{margin:16px 2px 8px;font-size:12.5px;font-weight:700;color:var(--muted);
+    display:flex;align-items:center;gap:8px}
+  .ghead .bar{width:3px;height:14px;border-radius:2px;background:#94a3b8}
+  .ghead .gn{font-size:11px;background:#e9ebee;border-radius:12px;padding:1px 8px;font-weight:600}
+  .task{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:14px;cursor:pointer;transition:.15s;user-select:none;margin-bottom:8px}
+  .task.on{background:#eef6ee;border-color:#86c98f}
+  .task input{width:23px;height:23px;margin:0;accent-color:#16a34a;pointer-events:none;flex:0 0 auto}
+  .task .body{flex:1;min-width:0}
+  .task .content{font-size:15px;font-weight:600;line-height:1.45;word-break:break-word}
+  .task .meta{margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .task .meta .who{font-weight:600;color:#475569}
+  .task .meta .due{color:#0369a1;font-weight:600}
+  .task .meta .due.over{color:#dc2626;font-weight:700}
+  .state{padding:60px 20px;text-align:center;color:var(--muted);font-size:14px}
+  .bottombar{position:fixed;left:0;right:0;bottom:0;z-index:10;background:rgba(255,255,255,.94);backdrop-filter:blur(8px);
+    border-top:1px solid var(--line);padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    display:flex;align-items:center;gap:10px}
+  .bottombar .sel{font-size:13px;color:var(--muted);font-weight:600;min-width:74px;text-align:center}
+  .bottombar .done{flex:1;border:none;background:#16a34a;color:#fff;border-radius:12px;padding:13px;
+    font-size:15px;font-weight:700;cursor:pointer;transition:.15s}
+  .bottombar .done:disabled{background:#cbd5e1;cursor:default}
+  .toast{position:fixed;bottom:92px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;
+    padding:11px 16px;border-radius:30px;font-size:13px;opacity:0;transition:.25s;z-index:30;
+    display:flex;align-items:center;gap:12px;pointer-events:none;white-space:nowrap}
+  .toast.on{opacity:1;pointer-events:auto}
+  .toast button{border:none;background:none;color:#93c5fd;font-size:13px;font-weight:700;cursor:pointer;padding:0}
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 タスク</h1>
+  <span class="count" id="count">読み込み中…</span>
+  <span class="sp"></span>
+  <a class="btn" href="<?= boardUrl ?>" target="_top">📊 進捗ボード</a>
+  <button class="btn" id="reload">↻</button>
+</header>
+
+<div class="chips" id="chips"></div>
+<div class="list" id="list"><div class="state">読み込み中…</div></div>
+
+<div class="bottombar">
+  <button class="btn" id="selall">全選択</button>
+  <span class="sel" id="selcount">0件選択</span>
+  <button class="done" id="complete" disabled>✅ 完了にする</button>
+</div>
+
+<div class="toast" id="toast"><span id="toastmsg"></span><button id="undo" style="display:none">元に戻す</button></div>
+
+<script>
+  // LINEから ?who=名前 で開かれたら、その人のタスクを最初から表示する
+  var WHO_INIT = <?!= JSON.stringify(whoParam || '') ?>;
+  var FILTER_OVERDUE = '((overdue))';   // 「期日超過」チップの内部値
+
+  var DATA = { tasks: [], assignees: [] };
+  var SELECTED = {};          // taskId -> true
+  var FILTER = '';            // 担当者名 or FILTER_OVERDUE（空=全部）
+  var FILTER_READY = false;   // 初回ロード時に一度だけ初期フィルタを決める
+  var LAST_DONE = [];         // 元に戻す用
+  var toastTimer = null;
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+  function toast(msg, withUndo){
+    var t = document.getElementById('toast');
+    document.getElementById('toastmsg').textContent = msg;
+    document.getElementById('undo').style.display = withUndo ? '' : 'none';
+    t.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ t.classList.remove('on'); }, withUndo ? 6000 : 2200);
+  }
+
+  // 初期フィルタ: URLのwho > 前回の選択(localStorage) を担当者候補に照合
+  function initFilter(){
+    var saved = '';
+    try { saved = localStorage.getItem('wbg_task_filter') || ''; } catch(e){}
+    var cand = WHO_INIT || saved;
+    if (!cand) return '';
+    if (cand === FILTER_OVERDUE) return cand;
+    for (var i = 0; i < DATA.assignees.length; i++) {
+      var a = DATA.assignees[i];
+      if (a.indexOf(cand) !== -1 || cand.indexOf(a) !== -1) return a;
+    }
+    return '';
+  }
+
+  function matchTask(t){
+    if (!FILTER) return true;
+    if (FILTER === FILTER_OVERDUE) return t.overdue;
+    return String(t.assignee || '').indexOf(FILTER) !== -1;
+  }
+  function visibleTasks(){ return DATA.tasks.filter(matchTask); }
+
+  function load(){
+    var list = document.getElementById('list');
+    list.innerHTML = '<div class="state">読み込み中…</div>';
+    var done = false;
+    var timer = setTimeout(function(){ if(!done) list.innerHTML = '<div class="state">⏳ サーバー応答がありません。再読み込みしてください。</div>'; }, 10000);
+    google.script.run
+      .withSuccessHandler(function(d){
+        done = true; clearTimeout(timer); DATA = d; SELECTED = {};
+        if (!FILTER_READY){ FILTER = initFilter(); FILTER_READY = true; }
+        render();
+      })
+      .withFailureHandler(function(e){ done=true; clearTimeout(timer); list.innerHTML = '<div class="state">読み込みに失敗：'+esc(e&&e.message?e.message:e)+'</div>'; })
+      .appGetTasks();
+  }
+
+  function render(){
+    // 担当者チップ（件数付き）＋期日超過チップ
+    var overCount = DATA.tasks.filter(function(t){ return t.overdue; }).length;
+    var html = '<div class="chip'+(FILTER===''?' on':'')+'" data-f="">全部<span class="n">'+DATA.tasks.length+'</span></div>';
+    if (overCount) html += '<div class="chip over'+(FILTER===FILTER_OVERDUE?' on':'')+'" data-f="'+FILTER_OVERDUE+'">⚠️超過<span class="n">'+overCount+'</span></div>';
+    DATA.assignees.forEach(function(a){
+      var n = DATA.tasks.filter(function(t){ return String(t.assignee||'').indexOf(a) !== -1; }).length;
+      html += '<div class="chip'+(FILTER===a?' on':'')+'" data-f="'+esc(a)+'">'+esc(a)+'<span class="n">'+n+'</span></div>';
+    });
+    document.getElementById('chips').innerHTML = html;
+
+    var tasks = visibleTasks();
+    var scope = FILTER === '' ? '全体' : (FILTER === FILTER_OVERDUE ? '期日超過' : FILTER);
+    document.getElementById('count').textContent = scope + ' ' + tasks.length + '件';
+
+    var list = document.getElementById('list');
+    if (!tasks.length){
+      // 絞り込み中の0件と、全体0件を区別して表示（誤解防止）
+      if (FILTER && DATA.tasks.length){
+        list.innerHTML = '<div class="state">「'+esc(scope)+'」の未完了はありません。<br>全体には '+DATA.tasks.length+'件あります。上の「全部」をタップしてください。</div>';
+      } else {
+        list.innerHTML = '<div class="state">🎉 未完了のタスクはゼロです（全体）</div>';
+      }
+      updateBar(); return;
+    }
+
+    // 案件ごとにまとめて表示（並びは期日超過→期日順のまま、最初に出た案件から）
+    var groups = {}, order = [];
+    tasks.forEach(function(t){
+      var key = t.project || '未分類';
+      if (!groups[key]){ groups[key] = []; order.push(key); }
+      groups[key].push(t);
+    });
+    list.innerHTML = order.map(function(proj){
+      var rows = groups[proj].map(function(t){
+        var on = !!SELECTED[t.id];
+        var meta = t.assignee ? '<span class="who">'+esc(t.assignee)+'</span>' : '';
+        meta += t.deadline
+          ? '<span class="due'+(t.overdue?' over':'')+'">📅 '+esc(t.deadline.slice(5).replace('-','/'))+(t.overdue?'（超過）':'')+'</span>'
+          : '<span class="due">期日未定</span>';
+        return '<div class="task'+(on?' on':'')+'" data-id="'+esc(t.id)+'">'+
+          '<input type="checkbox"'+(on?' checked':'')+'>'+
+          '<div class="body"><div class="content">'+esc(t.content)+'</div><div class="meta">'+meta+'</div></div></div>';
+      }).join('');
+      return '<div class="ghead"><span class="bar"></span>'+esc(proj)+'<span class="gn">'+groups[proj].length+'件</span></div>'+rows;
+    }).join('');
+    updateBar();
+  }
+
+  function updateBar(){
+    var n = Object.keys(SELECTED).length;
+    document.getElementById('selcount').textContent = n + '件選択';
+    document.getElementById('complete').disabled = n === 0;
+    var vis = visibleTasks();
+    var allOn = vis.length > 0 && vis.every(function(t){ return SELECTED[t.id]; });
+    document.getElementById('selall').textContent = allOn ? '解除' : '全選択';
+  }
+
+  document.getElementById('chips').addEventListener('click', function(e){
+    var c = e.target.closest('.chip'); if (!c) return;
+    FILTER = c.getAttribute('data-f') || '';
+    try { localStorage.setItem('wbg_task_filter', FILTER); } catch(err){}
+    render();
+  });
+
+  document.getElementById('list').addEventListener('click', function(e){
+    var row = e.target.closest('.task'); if (!row) return;
+    var id = row.getAttribute('data-id');
+    if (SELECTED[id]) delete SELECTED[id]; else SELECTED[id] = true;
+    row.classList.toggle('on');
+    row.querySelector('input').checked = !!SELECTED[id];
+    updateBar();
+  });
+
+  document.getElementById('selall').addEventListener('click', function(){
+    var vis = visibleTasks();
+    var allOn = vis.length > 0 && vis.every(function(t){ return SELECTED[t.id]; });
+    vis.forEach(function(t){ if (allOn) delete SELECTED[t.id]; else SELECTED[t.id] = true; });
+    render();
+  });
+
+  document.getElementById('complete').addEventListener('click', function(){
+    var ids = Object.keys(SELECTED);
+    if (!ids.length) return;
+    var btn = this;
+    btn.disabled = true; btn.textContent = '記録中…';
+    google.script.run
+      .withSuccessHandler(function(r){
+        btn.textContent = '✅ 完了にする';
+        if (r && r.ok){ LAST_DONE = ids; toast('✅ '+r.count+'件を完了にしました', true); load(); }
+        else { toast((r && r.msg) || '完了にできませんでした'); btn.disabled = false; }
+      })
+      .withFailureHandler(function(e){ btn.textContent = '✅ 完了にする'; btn.disabled = false; toast('エラー：'+(e&&e.message?e.message:e)); })
+      .appCompleteTasks(ids);
+  });
+
+  document.getElementById('undo').addEventListener('click', function(){
+    if (!LAST_DONE.length) return;
+    var ids = LAST_DONE; LAST_DONE = [];
+    document.getElementById('toast').classList.remove('on');
+    google.script.run
+      .withSuccessHandler(function(r){ toast('↩️ '+(r&&r.count?r.count:0)+'件を未完了に戻しました'); load(); })
+      .withFailureHandler(function(e){ toast('戻せませんでした：'+(e&&e.message?e.message:e)); })
+      .appReopenTasks(ids);
+  });
+
+  document.getElementById('reload').addEventListener('click', load);
+  load();
+</script>
+</body>
+</html>
