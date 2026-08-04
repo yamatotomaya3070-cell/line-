@@ -14,6 +14,13 @@ function pmRouteText(ev, text, sender, userId, groupId) {
   if (!intent) return false; // PMプレフィックス非該当 → 既存処理に委譲
 
   var body = pmStripPrefix(text);
+
+  // 店舗登録は「案件解決＋店舗名」だけで完結（Gemini抽出は不要）
+  if (intent === 'store_add') {
+    pmHandleStoreAdd(ev.replyToken, body, sender, userId, groupId, text);
+    return true;
+  }
+
   if (!body) {
     sendLineReply(ev.replyToken, '報告内容を続けてご記入ください。\n例：「案件更新 〇〇ホテル、見積提出しました。6/25にフォローします。」');
     return true;
@@ -52,8 +59,9 @@ function pmHandleCreate(replyToken, parsed, sender, userId, groupId, srcMsg) {
   });
   pmAddLog(rec['案件ID'], 'project_create', { '案件名': name, 'クライアント名': parsed.client_name || '', '担当者': parsed.assignee || '' }, srcMsg, sender, groupId, 'auto');
 
-  // Driveフォルダ作成（冪等）
-  var driveUrl = pmEnsureProjectFolder(rec['案件ID'], name);
+  // Driveフォルダ作成（冪等・新階層 親/案件名）。戻り値はオブジェクトなので .url を取り出す。
+  var driveRes = pmEnsureProjectFolder(rec['案件ID'], name, { source: 'line', actor: sender || '' });
+  var driveUrl = (driveRes && driveRes.ok) ? driveRes.url : '';
 
   // 金額（売上予定など）→ 確認待ち
   var pendingNote = '';
@@ -68,7 +76,47 @@ function pmHandleCreate(replyToken, parsed, sender, userId, groupId, srcMsg) {
     (parsed.client_name ? '\nクライアント：' + parsed.client_name : '') +
     (parsed.assignee ? '\n担当：' + parsed.assignee : '') +
     (driveUrl ? '\nDrive：' + driveUrl : '') +
-    pendingNote);
+    pendingNote +
+    '\n\n📍 続けて店舗を登録：「店舗追加 〇〇店」と送ってください（店舗フォルダを作成します）。');
+}
+
+// ---- 店舗登録（LINE）----
+//  「店舗追加 <店舗名>」→ 案件を解決し、店舗フォルダ(親/案件名/店舗名/6_データ)生成＋台帳登録。
+//  案件はグループ紐付けから解決。生成済みの店舗は以降 選択肢（pm_store_pick）として提示できる。
+function pmHandleStoreAdd(replyToken, storeName, sender, userId, groupId, srcMsg) {
+  storeName = String(storeName || '').trim();
+  if (!storeName) {
+    sendLineReply(replyToken, '店舗名を入れてください。\n例：「店舗追加 藤沢店」');
+    return;
+  }
+
+  // 案件を解決（グループ紐付け優先）。曖昧/未特定なら案内して終了。
+  var resolved = pmResolveProject(srcMsg, groupId, '');
+  if (resolved.status !== 'resolved') {
+    sendLineReply(replyToken,
+      'この店舗をひもづける案件を特定できませんでした。\n' +
+      '先に「新規案件 案件名:〇〇」で案件を登録するか、案件が紐づくグループから送ってください。');
+    return;
+  }
+
+  var projectName = resolved.name;
+  var proj = pmGetProjectByName(projectName);
+  var projectId = proj ? String(proj['案件ID'] || '') : '';
+
+  var sr = pmEnsureStoreRecord(projectId, storeName, {
+    caseName: projectName, groupId: groupId, source: 'line', actor: sender || '',
+  });
+  if (!sr.ok) { sendLineReply(replyToken, '店舗登録に失敗しました：' + (sr.error || '')); return; }
+
+  try { pmAddLog(projectId, 'store_create', { '案件名': projectName, '店舗名': storeName }, srcMsg, sender, groupId, 'auto'); } catch (e) {}
+
+  var dataUrl = (sr.folders && (sr.folders.dataFolderUrl || sr.folders.storeFolderUrl)) || '';
+  var stores  = projectId ? pmListStoresByProject(projectId) : [];
+  var names   = stores.map(function (s) { return String(s['店舗名']); }).filter(function (n) { return !!n; });
+  sendLineReply(replyToken,
+    '🏪 店舗を登録しました。\n案件：' + projectName + '\n店舗：' + storeName +
+    (dataUrl ? '\n保存先：' + dataUrl : '') +
+    (names.length > 1 ? '\n\nこの案件の店舗：' + names.join(' / ') : ''));
 }
 
 // ---- 進捗/請求/入金 報告 ----
@@ -265,7 +313,36 @@ function pmRoutePostback(ev, userId, groupId) {
     return true;
   }
 
+  // 既存店舗を選択肢から選ぶ：pid（案件ID）+ s（店舗名）→ 店舗フォルダを保証（冪等）
+  if (action === 'pm_store_pick') {
+    var pid   = params.pid ? decodeURIComponent(params.pid) : '';
+    var sname = params.s   ? decodeURIComponent(params.s)   : '';
+    if (!sname) { sendLineReply(ev.replyToken, '店舗を特定できませんでした。'); return true; }
+    var sproj = pid ? pmGetProjectById(pid) : null;
+    var scase = sproj ? sproj['案件名'] : '';
+    var ssr = pmEnsureStoreRecord(pid, sname, { caseName: scase, groupId: groupId, source: 'line-pick', actor: approver });
+    if (!ssr.ok) { sendLineReply(ev.replyToken, '店舗の準備に失敗しました：' + (ssr.error || '')); return true; }
+    var sUrl = (ssr.folders && (ssr.folders.dataFolderUrl || ssr.folders.storeFolderUrl)) || '';
+    sendLineReply(ev.replyToken, '🏪 店舗「' + sname + '」を選択しました。' + (sUrl ? '\n保存先：' + sUrl : ''));
+    return true;
+  }
+
   return false;
+}
+
+// 案件の既存店舗を Quick Reply の選択肢にして提示する共通導線。
+//   他フロー（写真受信時の店舗特定など）からも再利用できる。stores が無ければ false。
+function pmPromptStoreChoice(replyToken, projectId, promptText) {
+  if (!projectId) return false;
+  var stores = pmListStoresByProject(projectId);
+  if (!stores.length) return false;
+  var items = stores.slice(0, 12).map(function (s) {
+    return { type: 'action', action: { type: 'postback',
+      label: String(s['店舗名'] || '店舗').slice(0, 20),
+      data: 'action=pm_store_pick&pid=' + encodeURIComponent(projectId) + '&s=' + encodeURIComponent(s['店舗名']) } };
+  });
+  sendQuickReply(replyToken, promptText || '店舗を選んでください（新規は「店舗追加 店舗名」）。', items);
+  return true;
 }
 
 // LINEユーザーID → メンバー名（承認者表示用）

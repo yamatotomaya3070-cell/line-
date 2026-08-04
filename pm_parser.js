@@ -10,6 +10,7 @@
 var PM_PREFIX_RULES = [
   { re: /^[\s　]*(案件更新|進捗更新|進捗報告)[\s　:：]*/, intent: 'project_update' },
   { re: /^[\s　]*(新規案件|案件登録)[\s　:：]*/,        intent: 'project_create' },
+  { re: /^[\s　]*(店舗追加|店舗登録)[\s　:：]*/,        intent: 'store_add' },
   { re: /^[\s　]*(請求更新|請求報告)[\s　:：]*/,        intent: 'billing_update' },
   { re: /^[\s　]*(入金更新|入金報告)[\s　:：]*/,        intent: 'payment_update' },
   { re: /^[\s　]*(予定追加|カレンダー追加)[\s　:：]*/,   intent: 'calendar_update' },

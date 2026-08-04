@@ -14,6 +14,10 @@ var PM_SHEET_CALENDAR   = 'project_calendar_events';
 var PM_SHEET_PENDING    = 'project_pending_updates';
 // 設定（グループID等をソースに書かず、運用者が編集できる置き場）。Script Property の代替。
 var PM_SHEET_SETTINGS   = 'PM設定';
+// 追加シート（オプション）：アーカイブ実行ログ、アクション明細、LINE活動履歴
+var PM_SHEET_ARCHIVE_OPS     = 'archive_ops';
+var PM_SHEET_ARCHIVE_ACTIONS = 'archive_actions';
+var PM_SHEET_LINE_ACTIVITY   = 'line_activity';
 
 var PM_SETTINGS_HEADERS = ['キー', '値', '説明'];
 
@@ -320,12 +324,13 @@ function pmSeedInternalGroupRows() {
   });
 }
 
-// 既存タスク管理シートへ「関連案件ID」「作成元」列を追加（不足時のみ・右端）
+// 管理者が明示的に移行実行するためのサポート関数。
+// 通常のタスク登録処理からは自動的に呼び出してはいけません。
 function pmEnsureTaskColumns() {
   var sheet = getSheet('タスク管理');
   if (!sheet) return;
   var idx = pmHeaderIndex(sheet);
-  ['関連案件ID', '作成元'].forEach(function(h) {
+  ['担当者ID', '関連案件ID', '作成元'].forEach(function(h) {
     if (idx[h] === undefined) {
       sheet.getRange(1, sheet.getLastColumn() + 1).setValue(h);
     }

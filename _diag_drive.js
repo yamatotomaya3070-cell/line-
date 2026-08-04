@@ -40,6 +40,54 @@ function diagDriveStructure() {
   return report;
 }
 
+// 親フォルダ直下の「プロジェクト管理」フォルダの中身を確認する（読み取りのみ）。
+//   目的: 旧構成の残骸に何が入っているかを見て、削除可否/移行要否を判断する。
+//   実行: diagProjectKanriFolder() → ログ確認。Drive/シートは一切変更しない。
+function diagProjectKanriFolder() {
+  var lines = [];
+  function out(s) { lines.push(s); }
+  var rootId = PropertiesService.getScriptProperties().getProperty('DRIVE_FOLDER_ID') || DIAG_NEW_ROOT_ID;
+  out('■ 親フォルダ: ' + rootId);
+  var root;
+  try { root = DriveApp.getFolderById(rootId); }
+  catch (e) { out('親フォルダ取得ERR: ' + e.message); console.log(lines.join('\n')); return lines.join('\n'); }
+
+  var it = root.getFoldersByName('プロジェクト管理');
+  if (!it.hasNext()) { out('→ 「プロジェクト管理」フォルダは親直下にありません（既に無い）。'); console.log(lines.join('\n')); return lines.join('\n'); }
+
+  var pk = it.next();
+  out('■ 「プロジェクト管理」 id=' + pk.getId() + ' url=' + pk.getUrl());
+  if (it.hasNext()) out('  ⚠️ 同名「プロジェクト管理」が複数あります（重複）。');
+
+  // 直下サブフォルダ（旧 {案件ID}_{案件名}）とファイル数を列挙
+  var subs = pk.getFolders();
+  var subCount = 0, sample = [];
+  while (subs.hasNext()) {
+    var s = subs.next();
+    subCount++;
+    if (sample.length < 40) {
+      var fc = 0, fit = s.getFiles();
+      while (fit.hasNext() && fc < 1000) { fit.next(); fc++; }
+      sample.push('  └ ' + s.getName() + '（ファイル' + fc + '件）');
+    }
+  }
+  // 直下ファイル
+  var files = pk.getFiles(); var directFiles = 0;
+  while (files.hasNext() && directFiles < 5000) { files.next(); directFiles++; }
+
+  out('■ 直下の案件フォルダ数: ' + subCount + ' / 直下の直接ファイル数: ' + directFiles);
+  out(sample.length ? sample.join('\n') : '  (サブフォルダなし)');
+  if (subCount > sample.length) out('  … 他 ' + (subCount - sample.length) + ' 件');
+  out('');
+  out('■ 判定: ' + (subCount === 0 && directFiles === 0
+      ? '空 → そのままゴミ箱へ移動して問題なし'
+      : '中身あり → 自動削除しない。P5のdry-run移行で 案件名/店舗名/6_データ へ整理してから撤去'));
+
+  var report = lines.join('\n');
+  console.log(report);
+  return report;
+}
+
 // 権限を確認したいアカウント（運用=admin。個人=woodbasegroup も参考表示）
 var DIAG_CHECK_EMAILS = ['admin@woodbasef.com', 'woodbasegroup@gmail.com', 'woodbase.hamada@gmail.com'];
 

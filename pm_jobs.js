@@ -432,8 +432,9 @@ function pmJobsProcessPmJob(job) {
     if (!projectId) return { state: PM_JOB_STATE_ERROR, message: '案件IDが未指定です' };
     var proj = pmGetProjectById(projectId);
     if (!proj) return { state: PM_JOB_STATE_ERROR, message: '案件が見つかりません: ' + projectId };
-    var url = pmEnsureProjectFolder(projectId, proj['案件名']);
-    if (!url) return { state: PM_JOB_STATE_ERROR, message: 'フォルダを作成できませんでした（DRIVE_FOLDER_ID 設定を確認）' };
+    var res = pmEnsureProjectFolder(projectId, proj['案件名'], { source: 'app-job', actor: requester });
+    if (!res || !res.ok) return { state: PM_JOB_STATE_ERROR, message: (res && res.error) || 'フォルダを作成できませんでした（DRIVE_FOLDER_ID 設定を確認）' };
+    var url = res.url;
     pmAddLog(projectId, 'app_job', { 'DriveフォルダURL': url }, 'アプリ: Driveフォルダ作成', requester, '', 'auto');
     return { state: PM_JOB_STATE_DONE, url: url, message: '「' + (proj['案件名'] || projectId) + '」のDriveフォルダを用意しました' };
   }

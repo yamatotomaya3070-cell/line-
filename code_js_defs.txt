@@ -1,0 +1,117 @@
++  var parts = [
++  var key = webhookEventKey(ev);
++  var lock = LockService.getScriptLock();
++  var locked = false;
++function detectTasksSilently(ev, groupId, userId, sender, text, ts) {
++  var extracted = extractWithGemini(text, groupId, ts, sender);
++  var bound = getProjectNameByGroupId(groupId);
++  var cands = getProjectCandidates(text, groupId, hint, 1);
++  var names = [];
++  var mention = ev && ev.message && ev.message.mention;
++  var botId = getCachedBotUserId();
++    var name = getMemberNameByUserId(m.userId);
++  var out = [];
++    var nn = normalizeMemberName(n);
+-    var extracted = extractWithGemini(text, groupId, ts, sender);
+-      var question = buildAmbiguityQuestion(extracted);
+-        var bidQ = storePending(extracted, '', groupId, userId, text);
+-        var registered = commitDirectly(extracted, boundProject, groupId, userId);
+-          var cancelKey = saveCancelInfo(registered);
+-      var allProjects = getProjectData();
+-      var candidates = getProjectCandidates(text, groupId, extracted.projectNameHint, 4);
+-    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '' });
++    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '', dateConfirmed: s.dateConfirmed !== false });
+-function sendConfirmToDM(userId, extracted, proj, batchId) {
++function sendConfirmToDM(userId, extracted, proj, batchId, groupId, text) {
+-    var cands = getProjectCandidates('', '', '', 4);
++    var cands = getProjectCandidates(text || '', groupId || '', (extracted && extracted.projectNameHint) || '', 4);
++    var meetLink = schedule.date_confirmed ? addToCalendar(schedule) : '';
++    var extra = safeParseJson(row[11]);
++      var meetLink = schedule.date_confirmed ? addToCalendar(schedule) : '';
+-  var uid = getMemberUserId(task.assignee);
++  var dueLabel = task.due_date
++  var msg = (task.urgency === '髁E ? '🚨【�E急】タスクのご連絡\n' : '【タスクのご連絡】\n') +
++  var isTentative = schedule.date_confirmed === false;
++  var msg = '【予定�Eご連絡】\n案件�E�E + (schedule.project_name || '未刁E��E) +
++  var seen = {};
++    var uid = getMemberUserId(name);
++function isOnlineSchedule(schedule) {
++  var text = ((schedule.title || '') + ' ' + (schedule.location || '') + ' ' + (schedule.description || '')).toLowerCase();
++  var text = (schedule.location || '') + ' ' + (schedule.description || '');
++  var m = text.match(/https?:\/\/\S*(zoom\.us|meet\.google\.com|teams\.microsoft\.com|webex\.com)\S*/i);
++function createMeetEvent(calendarId, title, start, end, description, location, guestEmails) {
++  var resource = {
++  var ev = Calendar.Events.insert(resource, calendarId, {
++  var eps = ev.conferenceData && ev.conferenceData.entryPoints;
+-    var guests = getMemberGoogleEmailsFromNames(schedule.attendees).join(',');
++    var guestList = getMemberGoogleEmailsFromNames(schedule.attendees);
++    var guests = guestList.join(',');
++          var meetLink = createMeetEvent(config.CALENDAR_ID, title, start, end, description, schedule.location, guestList);
+-function saveFileToDrive(messageId, fileName, groupId, timestamp) {
++function saveFileToDrive(messageId, fileName, groupId, timestamp, messageType) {
+-    var blob        = res.getBlob();
++    var blob = res.getBlob();
++      var r = pmSaveLineFile(messageType || 'file', messageId, fileName, groupId, timestamp, blob);
++  var existing = getProjectNameByGroupId(groupId);
++  var intro = force
++  var t = String(text || '').trim();
++  var targetRow = 0;
++  var project = pmGetProjectByName(projectName);
++  var sheet = getSheet(PM_SHEET_GROUPS);
++  var data = sheet.getDataRange().getValues();
++  var headers = data[0].map(function(h) { return String(h).trim(); });
++  var gidCol = headers.indexOf('グループID');
++  var pidCol = headers.indexOf('案件ID');
++    var viaGroups = pmGetProjectNameByGroupIdFromGroups(groupId);
+-function registerNewProject(projectName, groupId) {
+-  var config = getConfig();
++    var config = getConfig();
++function isTaskListRequest(text) {
++  var sheet = getSheet('タスク管琁E);
++  var data  = sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues();
++  var clean = (memberName || '').replace('さん', '').trim();
++  var out   = [];
++    var st = String(data[i][5] || '');
++    var id = String(data[i][0] || '');
++  var tasks = collectOpenTasks(memberName);
++  var scope = memberName ? memberName.replace('さん', '') + 'さん' : '全佁E;
++  var lines = ['、E + scope + 'の未完亁E��スク】\n下�EボタンをタチE�Eすると完亁E��できます、E];
++    var dl = t.deadline ? Utilities.formatDate(new Date(t.deadline), 'Asia/Tokyo', 'M/d') : '期日未宁E;
++  var pageUrl = tasksPageUrl_(memberName);
++  var items = tasks.slice(0, 13).map(function(t, i) {
++    var label = '✁E + (i + 1) + ' ' + t.content;
++    var url = ScriptApp.getService().getUrl();
++    var token = String(PropertiesService.getScriptProperties().getProperty('DASHBOARD_TOKEN') || '').trim();
++    var q = url + '?page=tasks' + (token ? '&key=' + encodeURIComponent(token) : '');
++    var name = String(who || '').replace('さん', '').trim();
++    var url = ScriptApp.getService().getUrl();
++    var token = String(PropertiesService.getScriptProperties().getProperty('DASHBOARD_TOKEN') || '').trim();
++    var q = url + (page ? '?page=' + page : '?page=board');
++function isDashboardUrlRequest(text) {
++  var t = String(text).trim();
++  var t = String(text).trim();
++  var hasAlert = /(放置|進捁E?(アラーチE通知|リマインチE/.test(t);
++  var hasHere  = /(ここ|こちら|こ�EグルーチE/.test(t);
++  var hasSet   = /(に|へ|にして|送|設定|変更|登録)/.test(t);
++function handleSetProgressAlertHere(replyToken, groupId) {
++  var res = pmSetRoleGroupId('進捁E, groupId, 'LINEで設宁E);
++  var propOverride = String(PropertiesService.getScriptProperties().getProperty('PROGRESS_GROUP_ID') || '').trim();
++  var note = propOverride
++function handleDashboardUrlRequest(replyToken, who) {
++  var board   = dashboardPageUrl_('');
++  var tasks   = tasksPageUrl_(who);
++  var billing = dashboardPageUrl_('billing');
++  var lines = [
++  var taskId = decodeURIComponent(params.id || '');
++  var sheet = getSheet('タスク管琁E);
++  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();
++    var st = String(data[i][5] || '');
++function isDuplicateSchedule(title, date, groupId) {
++  var sheet = getSheet('スケジュール管琁E);
++  var data    = sheet.getDataRange().getValues();
++  var normNew = String(title || '').replace(/\s/g, '');
++  var dnew    = String(date || '').slice(0, 10);
++    var row = data[i];
++    var rowDate = row[3] instanceof Date ? fmtDate(row[3]) : String(row[3] || '').slice(0, 10);
++  var config = getConfig();
++  var byRole = (typeof pmRoleGroupId === 'function') ? pmRoleGroupId('日次通知') : '';

@@ -1,0 +1,37 @@
+@@ -16,6 +16,7 @@ function getConfig() {
+@@ -92,12 +93,54 @@ function doPost(e) {
+@@ -143,7 +186,7 @@ function handleEvent(ev) {
+@@ -194,10 +237,18 @@ function handleDM(ev, userId, groupId, sender, text, ts) {
+@@ -247,16 +298,98 @@ function handleGroup(ev, groupId, userId, sender, text, ts) {
+@@ -267,6 +400,8 @@ function handleMentionCommand(ev, groupId, userId, sender, text, ts) {
+@@ -565,14 +674,19 @@ function extractWithGemini(message, groupId, timestamp, senderName) {
+@@ -595,10 +709,11 @@ function extractWithGemini(message, groupId, timestamp, senderName) {
+@@ -781,11 +896,11 @@ function storePending(extracted, projectName, groupId, userId, rawMessage) {
+@@ -805,13 +920,13 @@ function sendConfirmUI(replyToken, extracted, projectName, batchId) {
+@@ -923,7 +1038,7 @@ function sendQuickReplyPush(targetId, text, items) {
+@@ -940,9 +1055,9 @@ function sendConfirmToDM(userId, extracted, proj, batchId) {
+@@ -959,6 +1074,8 @@ function sendConfirmToDM(userId, extracted, proj, batchId) {
+@@ -1013,6 +1130,10 @@ function handlePostback(ev, userId, groupId) {
+@@ -1172,12 +1293,15 @@ function commitDirectly(extracted, projectName, groupId, userId) {
+@@ -1189,9 +1313,12 @@ function commitDirectly(extracted, projectName, groupId, userId) {
+@@ -1225,11 +1352,12 @@ function applyProjectToPending(batchId, projectName) {
+@@ -1259,6 +1387,7 @@ function commitPendingItems(items) {
+@@ -1277,9 +1406,12 @@ function commitPendingItems(items) {
+@@ -1292,24 +1424,50 @@ function buildRegisteredMsg(registered) {
+@@ -1486,7 +1644,8 @@ function writeTask(task) {
+@@ -1511,22 +1670,68 @@ function saveMessageLog(groupId, senderName, text, timestamp) {
+@@ -1543,15 +1748,28 @@ function addToCalendar(schedule) {
+@@ -1694,7 +1912,7 @@ function bulkImportHistorySchedules() {
+@@ -1702,16 +1920,29 @@ function saveFileToDrive(messageId, fileName, groupId, timestamp) {
+@@ -1941,6 +2172,13 @@ function handleBotJoinGroup(replyToken, groupId) {
+@@ -1953,7 +2191,18 @@ function handleBotJoinGroup(replyToken, groupId) {
+@@ -1961,17 +2210,52 @@ function linkGroupToProject(groupId, projectName) {
+@@ -1997,7 +2281,18 @@ function detectProjectFromRecentLogs(groupId) {
+@@ -2005,8 +2300,10 @@ function registerNewProject(projectName, groupId) {
+@@ -2795,6 +3092,160 @@ function handleCompletion(text, memberName, replyToken) {
+@@ -2838,6 +3289,26 @@ function isDuplicateTask(content, assignee, groupId) {
+@@ -3046,6 +3517,31 @@ function sendLineMessage(targetId, text) {
+@@ -3108,9 +3604,10 @@ function setup() {
+@@ -3126,6 +3623,12 @@ function setup() {
+@@ -3217,7 +3720,10 @@ function createTriggers() {
+@@ -3569,13 +4075,14 @@ function archiveOldMessageLog() {

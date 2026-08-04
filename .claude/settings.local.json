@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check app_dashboard.js)",
+      "Bash(clasp push *)",
+      "Read(//c/Users/yamat/**)",
+      "Bash(clasp deploy *)"
+    ]
+  }
+}

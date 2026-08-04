@@ -2,7 +2,7 @@
 // pm_folders.js  —  新Drive階層リゾルバ（Phase 1）
 //   階層: ROOT(DRIVE_FOLDER_ID) / 案件名 / 店舗名 / (【原本】雛形の中身を複製)
 //   雛型: TEMPLATE_FOLDER_ID（例: 【原本】雛形 = 0_図面,1_見積,…,6_データ）
-//   LINE添付の保存先サブフォルダ = 6_データ（アンダースコア表記で統一）
+//   LINE添付の保存先サブフォルダ = 6_データ（雛型の実表記＝アンダースコアに統一）
 //
 //   方針:
 //   - 冪等: 台帳ID優先→完全一致→正規化一致→無ければ作成（§5/§10）。
@@ -10,6 +10,11 @@
 //   - 同時実行/Webhook再送でも二重作成しないよう pmWithLock で直列化。
 //   依存: pm_core.js(getConfig,pmWithLock,pmProp,pmIsBlank), pm_manager.js(pmAddLog)
 // ==========================================
+
+// 新Drive親フォルダ / 雛型テンプレの正規ID。ここが唯一の定義（実行時はScript Property優先で参照）。
+//   ※コード内の複数箇所ハードコードを避けるため、テスト/セットアップもこの定数を使う（§1）。
+var PM_NEW_DRIVE_ROOT_ID  = '14QoHs_nlMwN7IeY-SGgQ9HX51lnsKmZl';
+var PM_TEMPLATE_FOLDER_ID = '1eM6BVsC2T496Ve03vVa4O6gNSKS1dR-X';
 
 // LINEから届いた写真・ファイルの保存先サブフォルダ名（雛型内の該当フォルダ名と一致させる）
 var PM_DATA_SUBFOLDER_NAME = '6_データ';
@@ -86,16 +91,38 @@ function pmCopyFolderContents_(src, dest) {
   }
 }
 
+// 「6_データ」フォルダを表記ゆれ込みで探す（-, _, 空白, 各種ダッシュ, 全半角を融合）。
+//   「6-データ」「6 データ」等の別表記でも再利用し、重複作成を防ぐ（§5）。
+//   ※案件名/店舗名は固有名詞なので融合しない。データフォルダ専用の緩い一致。
+function pmDataFolderKey_(s) {
+  var t = String(s == null ? '' : s);
+  try { t = t.normalize('NFKC'); } catch (e) {}
+  return t.replace(/[\s　_\-‐-―－]+/g, '').toLowerCase();
+}
+
+function pmFindDataSubfolder_(storeFolder) {
+  if (!storeFolder) return null;
+  var exact = storeFolder.getFoldersByName(PM_DATA_SUBFOLDER_NAME);
+  if (exact.hasNext()) return exact.next();
+  var target = pmDataFolderKey_(PM_DATA_SUBFOLDER_NAME);
+  var it = storeFolder.getFolders();
+  while (it.hasNext()) {
+    var f = it.next();
+    if (pmDataFolderKey_(f.getName()) === target) return f;
+  }
+  return null;
+}
+
 // 店舗フォルダ配下に「6_データ」を保証する（雛型があれば複製、無ければ最低限そのフォルダだけ作る）
 function pmEnsureDataSubfolder_(storeFolder, templateId) {
-  var data = pmFindChildFolder_(storeFolder, PM_DATA_SUBFOLDER_NAME);
+  var data = pmFindDataSubfolder_(storeFolder);
   if (data) return { folder: data, created: false, templateCopied: false };
   var copied = false;
   if (!pmIsBlank(templateId)) {
     try { pmCopyTemplateInto_(storeFolder, templateId); copied = true; }
     catch (e) { console.warn('pmEnsureDataSubfolder_ 雛型複製失敗: ' + e.message); }
   }
-  data = pmFindChildFolder_(storeFolder, PM_DATA_SUBFOLDER_NAME);
+  data = pmFindDataSubfolder_(storeFolder);
   if (!data) data = storeFolder.createFolder(PM_DATA_SUBFOLDER_NAME); // フォールバック
   return { folder: data, created: true, templateCopied: copied };
 }
@@ -172,10 +199,10 @@ function pmResolveStoreFoldersUnlocked_(caseName, storeName, opts, cfg) {
 function pmApplyDriveConfig() {
   var p = PropertiesService.getScriptProperties();
   var before = { DRIVE_FOLDER_ID: p.getProperty('DRIVE_FOLDER_ID'), TEMPLATE_FOLDER_ID: p.getProperty('TEMPLATE_FOLDER_ID') };
-  p.setProperty('DRIVE_FOLDER_ID', '14QoHs_nlMwN7IeY-SGgQ9HX51lnsKmZl');
-  p.setProperty('TEMPLATE_FOLDER_ID', '1eM6BVsC2T496Ve03vVa4O6gNSKS1dR-X');
+  p.setProperty('DRIVE_FOLDER_ID', PM_NEW_DRIVE_ROOT_ID);
+  p.setProperty('TEMPLATE_FOLDER_ID', PM_TEMPLATE_FOLDER_ID);
   var msg = '設定完了\n  before: ' + JSON.stringify(before)
-          + '\n  after : DRIVE_FOLDER_ID=14QoHs… / TEMPLATE_FOLDER_ID=1eM6…';
+          + '\n  after : DRIVE_FOLDER_ID=' + PM_NEW_DRIVE_ROOT_ID + ' / TEMPLATE_FOLDER_ID=' + PM_TEMPLATE_FOLDER_ID;
   console.log(msg);
   return msg;
 }
@@ -183,8 +210,8 @@ function pmApplyDriveConfig() {
 // 新階層の生成を実機検証（本番親フォルダにテスト案件を作り、確認後に自動ゴミ箱移動で自己掃除）。
 //   Drive設定を切り替えずに、既知IDを直接指定して検証する。
 function pmTestNewHierarchy() {
-  var rootId = (typeof DIAG_NEW_ROOT_ID !== 'undefined') ? DIAG_NEW_ROOT_ID : '14QoHs_nlMwN7IeY-SGgQ9HX51lnsKmZl';
-  var tplId  = (typeof DIAG_TEMPLATE_ID !== 'undefined') ? DIAG_TEMPLATE_ID  : '1eM6BVsC2T496Ve03vVa4O6gNSKS1dR-X';
+  var rootId = PM_NEW_DRIVE_ROOT_ID;
+  var tplId  = PM_TEMPLATE_FOLDER_ID;
   var suffix = Utilities.getUuid().slice(0, 6);
   var caseName = '★TEST_削除可_' + suffix;
   var storeName = 'テスト店舗';
@@ -207,7 +234,7 @@ function pmTestNewHierarchy() {
       while (it.hasNext()) names.push(it.next().getName());
       names.sort();
       out('店舗フォルダ直下のサブフォルダ(' + names.length + '件): ' + names.join(', '));
-      out('→ 期待: 0_図面,1_見積,2_請求書,3_工程表,4_施工資料,5_写真,6_データ');
+      out('→ 期待: 雛型【原本】雛形の構成（… , ' + PM_DATA_SUBFOLDER_NAME + '）');
     } catch (e) { out('サブフォルダ列挙ERR: ' + e.message); }
 
     // 冪等性チェック: もう一度呼んで created=false になるはず

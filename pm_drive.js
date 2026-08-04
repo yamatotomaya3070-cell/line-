@@ -1,44 +1,48 @@
 // ==========================================
 // ProjectDrive：案件フォルダの自動作成（冪等）とURL保存
-//   共有ドライブ/(DRIVE_FOLDER_ID)/プロジェクト管理/{案件ID}_{案件名}/[01_見積..06_議事録]
-//   依存: pm_core.js, pm_manager.js, 既存 getConfig / getOrCreateFolder
+//   新階層（§2）: ROOT(DRIVE_FOLDER_ID) / 案件名   ← ここまでを保証する
+//     ※ 店舗名/6_データ は店舗登録時 pmEnsureStoreRecord が作る（pm_stores/pm_folders）。
+//   旧構成「ROOT/プロジェクト管理/{案件ID}_{案件名}/[01_見積..]」は廃止（余計な階層を作らない）。
+//   依存: pm_core.js, pm_manager.js, pm_stores.js(pmEnsureCaseFolderUnlocked_), pm_folders.js
 // ==========================================
 
+// 旧構成の名残（後片付け・E2Eテストの掃除でのみ参照）。新規作成には使わない。
 var PM_DRIVE_PARENT_NAME = 'プロジェクト管理';
 var PM_DRIVE_SUBFOLDERS  = ['01_見積', '02_図面', '03_契約書', '04_写真', '05_請求書', '06_議事録'];
 
-// 案件フォルダを保証する共通サービス。
-// source は監査ログ用（LINE / progress-board 等）。案件IDを名前に含め、DBのID/URLが
-// 既にあれば必ず再利用するため、再送・リトライ・二重クリックでも新規作成しない。
+// 案件フォルダ（新階層 ROOT/案件名）を保証する共通サービス。
+//   - source は監査ログ用（LINE / progress-board 等）。
+//   - DBの driveProjectFolderId/Url が既にあれば必ず再利用（再送・リトライ・二重クリックで新規作成しない・§6/§10）。
+//   - ロックは取らない（pmEnsureCaseFolderUnlocked_ を利用）。呼び出し元がロック内でも安全（入れ子回避）。
+//   - 旧「プロジェクト管理」層は作らない。
 function pmEnsureProjectFolder(projectId, projectName, opts) {
   opts = opts || {};
   // デプロイ直後でも、Drive状態列だけは非破壊で不足分を追加する。
   pmEnsureDriveColumns_();
   var proj = pmGetProjectById(projectId);
   if (!proj) return { ok: false, status: 'error', error: '案件が見つかりません' };
-  if (!pmIsBlank(proj['DriveフォルダID']) || !pmIsBlank(proj['DriveフォルダURL'])) {
-    return { ok: true, status: 'ready', id: String(proj['DriveフォルダID'] || ''), url: String(proj['DriveフォルダURL'] || '') };
+  // 新階層フォルダが既に記録済みなら再利用
+  if (!pmIsBlank(proj['driveProjectFolderId']) || !pmIsBlank(proj['driveProjectFolderUrl'])) {
+    return { ok: true, status: 'ready',
+      id:  String(proj['driveProjectFolderId']  || ''),
+      url: String(proj['driveProjectFolderUrl'] || '') };
   }
 
-  var config = getConfig();
-  if (!config.DRIVE_FOLDER_ID) return pmSaveDriveError_(proj, 'DRIVE_FOLDER_ID未設定');
-
+  var caseName = projectName || proj['案件名'];
   try {
-    pmWriteRowFields(PM_SHEET_PROJECTS, proj._row, { 'Drive同期ステータス': 'creating', 'Drive同期エラー': '' });
-    var parent = getOrCreateFolder(config.DRIVE_FOLDER_ID, PM_DRIVE_PARENT_NAME);
-    if (!parent) throw new Error('Drive親フォルダを取得または作成できません');
-    var folderName = pmProjectFolderName_(projectId, projectName);
-    var projectFolder = getOrCreateFolder(parent.getId(), folderName);
-    if (!projectFolder) throw new Error('案件フォルダを取得または作成できません');
-    PM_DRIVE_SUBFOLDERS.forEach(function(sub) { getOrCreateFolder(projectFolder.getId(), sub); });
+    var r = pmEnsureCaseFolderUnlocked_(projectId, caseName, null, {
+      source: opts.source || 'unknown', actor: opts.actor || '',
+      rootId: opts.rootId, templateId: opts.templateId,
+    });
+    if (!r.ok) return pmSaveDriveError_(proj, r.error || '案件フォルダ作成失敗');
 
-    var now = new Date();
-    var result = { 'DriveフォルダID': projectFolder.getId(), 'DriveフォルダURL': projectFolder.getUrl(),
-      'Driveフォルダ名': projectFolder.getName(), 'Drive作成日時': now,
+    // 後方互換：旧Drive状態列にも同じ案件フォルダを反映（ダッシュボードの「開く」/フラット検索が参照）。
+    var result = { 'DriveフォルダID': r.caseFolderId, 'DriveフォルダURL': r.caseFolderUrl,
+      'Driveフォルダ名': String(caseName || ''), 'Drive作成日時': new Date(),
       'Drive同期ステータス': 'ready', 'Drive同期エラー': '', '更新日': pmTodayYmd() };
-    pmWriteRowFields(PM_SHEET_PROJECTS, proj._row, result);
-    try { pmAddLog(projectId, 'drive_folder_ready', { source: opts.source || 'unknown', folderId: projectFolder.getId() }, '', opts.actor || '', ''); } catch (ignore) {}
-    return { ok: true, status: 'ready', id: projectFolder.getId(), url: projectFolder.getUrl(), name: projectFolder.getName() };
+    try { if (proj._row) pmWriteRowFields(PM_SHEET_PROJECTS, proj._row, result); } catch (e) {}
+    try { pmAddLog(projectId, 'drive_folder_ready', { source: opts.source || 'unknown', folderId: r.caseFolderId, hierarchy: '案件名(新階層)' }, '', opts.actor || '', ''); } catch (ignore) {}
+    return { ok: true, status: 'ready', id: r.caseFolderId, url: r.caseFolderUrl, name: String(caseName || '') };
   } catch (err) {
     console.error('pmEnsureProjectFolder [' + (opts.source || 'unknown') + '] project=' + projectId + ':', err.message);
     return pmSaveDriveError_(proj, err.message);

@@ -16,10 +16,10 @@ function doGet(e) {
         '<p>URLの末尾に <code>?key=（合言葉）</code> を付けて開いてください。</p></div>'
       ).setTitle('進捗ボード');
     }
-    // ?page=billing → 請求・入金 / ?page=tasks → タスク / それ以外 → 進捗ボード
+    // ?page=app → 進捗管理アプリ(新UI) / ?page=billing → 請求・入金 / ?page=tasks → タスク / それ以外 → 進捗ボード
     var page = (e && e.parameter) ? String(e.parameter.page || '').trim() : '';
-    var pageFile = (page === 'billing') ? 'billing' : (page === 'tasks') ? 'tasks' : 'dashboard';
-    var titles = { billing: 'WOODBASE 請求・入金', tasks: 'WOODBASE タスク', dashboard: 'WOODBASE 進捗ボード' };
+    var pageFile = (page === 'app') ? 'pm_app' : (page === 'billing') ? 'billing' : (page === 'tasks') ? 'tasks' : 'dashboard';
+    var titles = { pm_app: 'WOODBASE 進捗管理', billing: 'WOODBASE 請求・入金', tasks: 'WOODBASE タスク', dashboard: 'WOODBASE 進捗ボード' };
     // ページ間リンク用URLをテンプレートに注入（キー必須運用でも遷移できるように）
     var baseUrl = ScriptApp.getService().getUrl();
     var keyQuery = token ? ('&key=' + encodeURIComponent(key)) : '';
@@ -27,6 +27,7 @@ function doGet(e) {
     t.boardUrl = baseUrl + '?page=board' + keyQuery;
     t.billingUrl = baseUrl + '?page=billing' + keyQuery;
     t.tasksUrl = baseUrl + '?page=tasks' + keyQuery;
+    t.appUrl = baseUrl + '?page=app' + keyQuery;
     // タスク画面の初期絞り込み（LINEから ?who=名前 で開いた場合）
     t.whoParam = (e && e.parameter) ? String(e.parameter.who || '').trim() : '';
     return t.evaluate()
@@ -40,6 +41,75 @@ function doGet(e) {
       String(err && err.stack ? err.stack : err) + '</pre></div>'
     );
   }
+}
+
+// intent → 表示用ラベル（タイムライン）
+var APP_INTENT_LABEL = {
+  phase_update:    'フェーズを更新', status_update: '状況を更新', assignee_update: '担当者を変更',
+  progress_update: '進捗を更新',     archive:       '案件をアーカイブ',
+  billing_update:  '請求を更新',     payment_update:'入金を更新',
+};
+// 日時セルを yyyy-MM-dd HH:mm に。Dateでも文字列でも扱えるように。
+function appFmtLogDate_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  return String(v == null ? '' : v).trim();
+}
+function appLogTime_(v) {
+  if (v instanceof Date) return v.getTime();
+  var d = new Date(String(v || '').replace(/-/g, '/'));
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+// 案件ID→案件名 の辞書（タイムライン/お知らせの突き合わせ用）
+function appProjectNameMap_() {
+  var m = {};
+  pmReadObjects(PM_SHEET_PROJECTS).forEach(function(r) { m[String(r['案件ID'] || '')] = String(r['案件名'] || ''); });
+  return m;
+}
+
+// 更新履歴（project_logs）を新しい順に返す。案件名を突き合わせて表示用に整形。
+function appGetTimeline(limit) {
+  limit = Number(limit) || 40;
+  if (!getSheet(PM_SHEET_LOGS)) return [];
+  var names = appProjectNameMap_();
+  var out = pmReadObjects(PM_SHEET_LOGS).map(function(r) {
+    var changes = {};
+    try { changes = JSON.parse(r['変更項目'] || '{}'); } catch (e) {}
+    var parts = Object.keys(changes).map(function(k) { return k + '：' + changes[k]; });
+    var intent = String(r['intent'] || '');
+    return {
+      projectId: String(r['案件ID'] || ''),
+      name:      names[String(r['案件ID'] || '')] || String(r['案件ID'] || ''),
+      intent:    intent,
+      label:     APP_INTENT_LABEL[intent] || intent || '更新',
+      detail:    parts.join('／'),
+      who:       String(r['更新者'] || ''),
+      date:      appFmtLogDate_(r['日時']),
+      _t:        appLogTime_(r['日時']),
+      kind:      String(r['適用区分'] || ''),
+    };
+  });
+  out.sort(function(a, b) { return b._t - a._t; });
+  return out.slice(0, limit);
+}
+
+// お知らせ＝アラート(project_alerts)を新しい順に。案件名を突き合わせ。
+function appGetNotices(limit) {
+  limit = Number(limit) || 30;
+  if (!getSheet(PM_SHEET_ALERTS)) return [];
+  var names = appProjectNameMap_();
+  var rows = pmReadObjects(PM_SHEET_ALERTS).map(function(r) {
+    return {
+      projectId: String(r['案件ID'] || ''),
+      name:      names[String(r['案件ID'] || '')] || '',
+      type:      String(r['種別'] || ''),
+      body:      String(r['内容'] || ''),
+      date:      appFmtLogDate_(r['検知日時']),
+      _t:        appLogTime_(r['検知日時']),
+      status:    String(r['状態'] || ''),
+    };
+  });
+  rows.sort(function(a, b) { return b._t - a._t; });
+  return rows.slice(0, limit);
 }
 
 // 区分=社内/その他、取消=TRUE を除外した案件のみ返す
@@ -63,6 +133,7 @@ function appGetData() {
       phase:      phase,
       // 現在フェーズに対応するサブステータス（営業ステータス等の列値）
       status:     String(r[PM_PHASE_COLUMN[phase] || ''] || ''),
+      updated:    appFmtDate_(r['最終更新日']),
       progress:   String(r['施工進捗'] || ''),
       nextAction: String(r['次回アクション'] || ''),
       nextDue:    String(r['次回アクション期限'] || ''),
@@ -97,6 +168,11 @@ function appStoresByProject_() {
       name:           String(s['店舗名'] || ''),
       storeFolderUrl: String(s['driveStoreFolderUrl'] || ''),
       dataFolderUrl:  String(s['driveDataFolderUrl'] || ''),
+      // 店舗ごとの進捗（無ければ空＝営業扱い）
+      phase:          String(s['現在フェーズ'] || ''),
+      status:         String(s['店舗ステータス'] || ''),
+      progress:       String(s['施工進捗'] || ''),
+      updated:        appFmtDate_(s['進捗更新日'] || s['更新日時']),
     });
   });
   return map;
@@ -270,20 +346,15 @@ function appCreateDriveFolder(projectId, who) {
 
 // 取り消し（物理削除でなくアーカイブ）
 function appArchiveProject(projectId, who) {
-  if (!projectId) return { ok: false };
+  if (!projectId) return { ok: false, msg: '案件IDが必要です' };
   var sh = getSheet(PM_SHEET_PROJECTS);
+  if (!sh) return { ok: false, msg: 'projectsシートが見つかりません' };
   var data = sh.getDataRange().getValues();
+  if (!data || !data.length) return { ok: false, msg: 'projectsシートが空です' };
   var h = data[0].map(function(x) { return String(x).trim(); });
-  var cId = h.indexOf('案件ID'), cDel = h.indexOf('取消');
-  if (cDel === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][cId] || '').trim() === String(projectId).trim()) {
-      sh.getRange(i + 1, cDel + 1).setValue('TRUE');
-      try { pmAddLog(projectId, 'archive', { '取消': 'TRUE' }, '', appActor_(who), '', 'auto'); } catch (e2) {}
-      return { ok: true };
-    }
-  }
-  return { ok: false };
+  if (h.indexOf('案件ID') === -1) return { ok: false, msg: '案件ID列がありません（setup実行を）' };
+  if (h.indexOf('取消') === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
+  return pmArchiveProject(projectId, appActor_(who), 'auto');
 }
 
 // 請求/入金入力（承認制は維持）：LINEの「請求更新」「入金更新」と同じ経路
@@ -381,4 +452,138 @@ function appParseStoreNames_(raw) {
   var seen = {}, out = [];
   arr.forEach(function(s) { var t = String(s == null ? '' : s).trim(); if (t && !seen[t]) { seen[t] = 1; out.push(t); } });
   return out;
+}
+
+// ==========================================
+// 店舗ごとの進捗（stores シートへ書き込み）。案件と同じフェーズ体系を使う。
+//   列が未追加の環境でも動くよう、書込前に pmEnsureStoreSheet で列を保証する。
+// ==========================================
+function appSetStoreField_(storeId, colName, value, who, intent, validate) {
+  if (!storeId) return { ok: false, msg: '店舗が不明です' };
+  pmEnsureStoreSheet();  // 進捗列を非破壊で保証
+  var sh = getSheet(PM_SHEET_STORES);
+  if (!sh) return { ok: false, msg: 'storesシートがありません' };
+  var data = sh.getDataRange().getValues();
+  var h = data[0].map(function(x) { return String(x).trim(); });
+  var cId = h.indexOf('店舗ID'), cCol = h.indexOf(colName),
+      cUpd = h.indexOf('進捗更新日'), cWho = h.indexOf('進捗更新者'), cPid = h.indexOf('案件ID'), cName = h.indexOf('店舗名');
+  if (cCol === -1) return { ok: false, msg: colName + ' 列がありません' };
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][cId] || '').trim() !== String(storeId).trim()) continue;
+    if (validate) { var v = validate(String(data[i][h.indexOf('現在フェーズ')] || '')); if (v) return v; }
+    sh.getRange(i + 1, cCol + 1).setValue(value);
+    if (cUpd !== -1) sh.getRange(i + 1, cUpd + 1).setValue(pmTodayYmd());
+    if (cWho !== -1 && appWho_(who)) sh.getRange(i + 1, cWho + 1).setValue(appWho_(who));
+    var chg = { '店舗': String(data[i][cName] || '') }; chg[colName] = value;
+    try { pmAddLog(String(data[i][cPid] || ''), intent, chg, '', appActor_(who), '', 'auto'); } catch (e2) {}
+    return { ok: true };
+  }
+  return { ok: false, msg: '店舗が見つかりません' };
+}
+
+function appSetStorePhase(storeId, phase, who) {
+  if (!phase || !PM_PHASES[phase]) return { ok: false, msg: 'フェーズが不正です' };
+  return appSetStoreField_(storeId, '現在フェーズ', phase, who, 'store_phase_update');
+}
+function appSetStoreStatus(storeId, status, who) {
+  status = String(status || '').trim();
+  return appSetStoreField_(storeId, '店舗ステータス', status, who, 'store_status_update', function(phase) {
+    if (status && phase && (PM_PHASES[phase] || []).indexOf(status) === -1) {
+      return { ok: false, msg: '「' + phase + '」にないステータスです: ' + status };
+    }
+    return null;
+  });
+}
+function appSetStoreProgress(storeId, pct, who) {
+  var n = Number(pct);
+  if (isNaN(n) || n < 0 || n > 100) return { ok: false, msg: '進捗は0〜100で指定してください' };
+  return appSetStoreField_(storeId, '施工進捗', n, who, 'store_progress_update');
+}
+
+// ==========================================
+// LINEグループ紐付け（アプリUI用・§LINE連携）
+//   自動通知は行わない。既存の linkGroupToProject / 案件グループ台帳 / メッセージログ を再利用する。
+// ==========================================
+
+// この案件に紐付くLINEグループ＋紐付け候補（メッセージログの既知グループ）を返す
+function appGetLineGroups(projectId) {
+  var proj = pmGetProjectById(projectId);
+  if (!proj) return { ok: false, msg: '案件が見つかりません' };
+  var name = String(proj['案件名'] || '');
+  var linked = [];
+  // ① 案件グループ台帳（1案件に複数グループ可）
+  if (getSheet(PM_SHEET_GROUPS)) {
+    pmReadObjects(PM_SHEET_GROUPS).forEach(function(g) {
+      if (String(g['案件ID'] || '') === String(projectId)) {
+        linked.push({ groupId: String(g['グループID'] || ''), kind: String(g['種別'] || ''), label: String(g['表示名'] || '') });
+      }
+    });
+  }
+  // ② projects.LINEグループID（従来の単一列）も拾う
+  var primary = String(proj['LINEグループID'] || '').trim();
+  if (primary && !linked.some(function(x) { return x.groupId === primary; })) linked.push({ groupId: primary, kind: '主', label: '' });
+
+  return { ok: true, projectName: name, linked: linked, candidates: appKnownLineGroups_(24) };
+}
+
+// メッセージログから既知グループを集計（最近の活動順・現在の紐付け案件名つき）
+function appKnownLineGroups_(limit) {
+  var sh = getSheet('メッセージログ');
+  if (!sh || sh.getLastRow() < 2) return [];
+  var data = sh.getDataRange().getValues();
+  var map = {};
+  for (var i = 1; i < data.length; i++) {
+    var gid = String(data[i][1] || '').trim();
+    if (!gid) continue;
+    var o = map[gid] || (map[gid] = { groupId: gid, last: '', count: 0, sample: '' });
+    o.count++;
+    var dt = data[i][0];
+    var dts = (dt instanceof Date) ? Utilities.formatDate(dt, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(dt || '');
+    if (dts > o.last) { o.last = dts; o.sample = String(data[i][3] || '').slice(0, 30); }
+  }
+  var arr = Object.keys(map).map(function(k) {
+    var o = map[k];
+    try { o.linkedTo = getProjectNameByGroupId(o.groupId) || ''; } catch (e) { o.linkedTo = ''; }
+    return o;
+  });
+  arr.sort(function(a, b) { return a.last < b.last ? 1 : a.last > b.last ? -1 : 0; });
+  return arr.slice(0, limit || 24);
+}
+
+// 案件にLINEグループを紐付け（既存 linkGroupToProject＋台帳upsertを利用）。物理送信なし。
+function appLinkLineGroup(projectId, groupId) {
+  if (!projectId || !String(groupId || '').trim()) return { ok: false, msg: '案件とグループが必要です' };
+  var proj = pmGetProjectById(projectId);
+  if (!proj) return { ok: false, msg: '案件が見つかりません' };
+  var name = String(proj['案件名'] || '');
+  var gid = String(groupId).trim();
+  try {
+    if (typeof linkGroupToProject === 'function') linkGroupToProject(gid, name);
+    // プロジェクト管理(辞書)に無い案件でも台帳を確実に更新（linkGroupToProjectが早期returnするケースの保険）
+    if (typeof upsertProjectGroupLink_ === 'function') upsertProjectGroupLink_(gid, name);
+  } catch (e) {
+    return { ok: false, msg: '紐付けエラー：' + e.message };
+  }
+  try { pmAddLog(projectId, 'line_link', { 'LINEグループ': gid }, '', 'webapp', gid, 'auto'); } catch (e2) {}
+  return { ok: true };
+}
+
+// 紐付け解除（案件グループ台帳の該当行の案件IDを空に）。物理送信なし。
+function appUnlinkLineGroup(projectId, groupId) {
+  if (!projectId || !String(groupId || '').trim()) return { ok: false, msg: '引数不足' };
+  var sh = getSheet(PM_SHEET_GROUPS);
+  if (!sh || sh.getLastRow() < 2) return { ok: false, msg: '案件グループ台帳がありません' };
+  var data = sh.getDataRange().getValues();
+  var h = data[0].map(function(x) { return String(x).trim(); });
+  var cGid = h.indexOf('グループID'), cPid = h.indexOf('案件ID');
+  if (cGid === -1 || cPid === -1) return { ok: false, msg: '台帳の列が不正です' };
+  var gid = String(groupId).trim();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][cGid] || '').trim() === gid && String(data[i][cPid] || '').trim() === String(projectId).trim()) {
+      sh.getRange(i + 1, cPid + 1).clearContent();
+      try { pmAddLog(projectId, 'line_unlink', { 'LINEグループ': gid }, '', 'webapp', gid, 'auto'); } catch (e2) {}
+      return { ok: true };
+    }
+  }
+  return { ok: false, msg: '該当の紐付けが見つかりません' };
 }
