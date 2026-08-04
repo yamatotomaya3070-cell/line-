@@ -145,172 +145,46 @@ function pmTestNameMatching() {
   console.log((pmNamesLooselyEqual('Aビル', 'Bビル') === false ? '✅' : '❌') + ' 別案件=不一致');
 }
 
-function pmTestModeEnabled() {
-  var props = PropertiesService.getScriptProperties();
-  var mode = String(props.getProperty('TEST_MODE') || '').trim().toLowerCase();
-  var sheetId = String(props.getProperty('TEST_SPREADSHEET_ID') || '').trim();
-  if (!sheetId) return false;
-  if (!(mode === 'true' || mode === '1' || mode === 'yes')) return false;
-  try {
-    return getSS().getId() === sheetId;
-  } catch (e) {
-    console.log('pmTestModeEnabled: TEST_SPREADSHEET_ID のスプレッドシートを開けません: ' + e.message);
-    return false;
-  }
-}
-
 // 追加修正テストを一括実行
 function pmRunNewTests() {
-  if (!pmTestModeEnabled()) {
-    console.log('pmRunNewTests: TEST_MODE=true または TEST_SPREADSHEET_ID が必要です。実行を中止しました。');
-    return;
-  }
   console.log('--- Webhook冪等性 ---');      pmTestWebhookIdempotency();
   console.log('--- 進捗hold判定 ---');        pmTestProgressHold();
   console.log('--- 承認権限 ---');            pmTestApproverAuth();
   console.log('--- 名称一致 ---');            pmTestNameMatching();
   console.log('--- 取り消し(アーカイブ) ---'); pmTestArchiveProject();
-  console.log('--- app フィルタリング ---'); pmTestAppArchiveFiltering();
   console.log('--- スケジュール重複 ---');    pmTestScheduleDedupSmoke();
 }
 
 // 取り消し(アーカイブ)の単体テスト
 function pmTestArchiveProject() {
-  if (!pmTestModeEnabled()) {
-    console.log('pmTestArchiveProject: TEST_MODE=true または TEST_SPREADSHEET_ID が必要です。実行を中止しました。');
-    return;
-  }
   var uniqueName = 'TEST_ARCHIVE_' + generateId();
-  var pid = null;
-  try {
-    var rec = pmEnsureProjectRecord(uniqueName, { client: 'テスト', assignee: 'tester', updatedBy: 'tester' });
-    pid = rec && rec['案件ID'];
-    if (!pid) { console.log('❌ アーカイブテスト: 案件作成に失敗しました'); return; }
+  var rec = pmEnsureProjectRecord(uniqueName, { client: 'テスト', assignee: 'tester', updatedBy: 'tester' });
+  var pid = rec && rec['案件ID'];
+  if (!pid) { console.log('❌ アーカイブテスト: 案件作成に失敗しました'); return; }
 
-    // 正常系: アーカイブ実行
-    var first = pmArchiveProject(pid, 'tester', 'test');
-    var row = pmGetProjectById(pid);
-    var canceled = row && String(row['取消'] || '').trim().toUpperCase();
-    console.log((first.ok && canceled === 'TRUE' ? '✅' : '❌') + ' 正常系: アーカイブできる');
+  // 正常系: アーカイブ実行
+  var first = pmArchiveProject(pid, 'tester', 'test');
+  var row = pmGetProjectById(pid);
+  var canceled = row && String(row['取消'] || '').trim().toUpperCase();
+  console.log((first.ok && canceled === 'TRUE' ? '✅' : '❌') + ' 正常系: アーカイブできる');
 
-    // 重複実行: 2回目は失敗とはせず既存状態を維持
-    var second = pmArchiveProject(pid, 'tester', 'test');
-    var duplicateOk = second.ok && String(second.msg || '').indexOf('既にアーカイブ済みです') !== -1;
-    console.log((duplicateOk ? '✅' : '❌') + ' 重複実行: 既にアーカイブ済みを無害化');
+  // 重複実行: 2回目は失敗とはせず既存状態を維持
+  var second = pmArchiveProject(pid, 'tester', 'test');
+  var duplicateOk = second.ok && String(second.msg || '').indexOf('既にアーカイブ済みです') !== -1;
+  console.log((duplicateOk ? '✅' : '❌') + ' 重複実行: 既にアーカイブ済みを無害化');
 
-    // 異常系: 存在しない案件ID
-    var invalid = pmArchiveProject('INVALID-PROJECT-ID-123', 'tester', 'test');
-    console.log((invalid.ok === false && String(invalid.msg || '').indexOf('案件が見つかりません') !== -1 ? '✅' : '❌') + ' 異常系: 存在しない案件IDで拒否');
+  // 異常系: 存在しない案件ID
+  var invalid = pmArchiveProject('INVALID-PROJECT-ID-123', 'tester', 'test');
+  console.log((invalid.ok === false && String(invalid.msg || '').indexOf('案件が見つかりません') !== -1 ? '✅' : '❌') + ' 異常系: 存在しない案件IDで拒否');
 
-    // 異常系: projectIdなし
-    var missing = pmArchiveProject('', 'tester', 'test');
-    console.log((missing.ok === false && String(missing.msg || '').indexOf('案件IDが必要です') !== -1 ? '✅' : '❌') + ' 異常系: projectIdなしで拒否');
-  } catch (e) {
-    console.log('❌ pmTestArchiveProject: 例外発生 - ' + e.message);
-  } finally {
-    if (pid) {
-      var deletedProjectRows = pmDeleteRowsWhere(PM_SHEET_PROJECTS, '案件名', uniqueName);
-      var deletedLogRows = pmDeleteRowsWhere(PM_SHEET_LOGS, '案件ID', pid);
-      console.log('削除: projects=' + deletedProjectRows + '行, logs=' + deletedLogRows + '行');
-    }
-  }
-}
+  // 異常系: projectIdなし
+  var missing = pmArchiveProject('', 'tester', 'test');
+  console.log((missing.ok === false && String(missing.msg || '').indexOf('案件IDが必要です') !== -1 ? '✅' : '❌') + ' 異常系: projectIdなしで拒否');
 
-function pmTestMultiAssigneePromptCases() {
-  var tests = [
-    {
-      title: 'メンションIDの抽出',
-      fn: function() {
-        var ev = { message: { mention: { mentionees: [{ userId: 'U1' }, { userId: 'U2' }] } } };
-        return getMentionedMemberIds(ev).join(',') === 'U1,U2';
-      }
-    },
-    {
-      title: 'メンションIDの重複除去',
-      fn: function() {
-        var ev = { message: { mention: { mentionees: [{ userId: 'U1' }, { userId: 'U1' }] } } };
-        return getMentionedMemberIds(ev).join(',') === 'U1';
-      }
-    },
-    {
-      title: 'ユーザーIDマージの dedupe',
-      fn: function() {
-        return mergeUserIds(['U1', 'U2'], ['U2', 'U3']).join(',') === 'U1,U2,U3';
-      }
-    },
-    {
-      title: 'ユーザーIDマージの空配列対応',
-      fn: function() {
-        return mergeUserIds(null, ['U1']).join(',') === 'U1' && mergeUserIds(['U1'], null).join(',') === 'U1';
-      }
-    },
-    {
-      title: '担当者名マージの dedupe',
-      fn: function() {
-        return mergeNames('田中、鈴木', ['鈴木', '佐藤']) === '田中、鈴木、佐藤';
-      }
-    },
-    {
-      title: '担当者名マージの空対応',
-      fn: function() {
-        return mergeNames('', ['鈴木']) === '鈴木' && mergeNames('田中', []).trim() === '田中';
-      }
-    },
-    {
-      title: '仮タスク再構築で assignee_user_ids を保持',
-      fn: function() {
-        var items = [
-          [ 'BID', 1, 'task', 'G1', 'U1', '案件A', '内容A', '田中', '2026-08-01', 'now', '', JSON.stringify({ urgency:'高', dateConfirmed:true, assignee_user_ids:['U1','U2'] }) ]
-        ];
-        var extracted = rebuildExtractedFromPending(items, '案件A');
-        return extracted.tasks.length === 1 && extracted.tasks[0].assignee_user_ids && extracted.tasks[0].assignee_user_ids.join(',') === 'U1,U2';
-      }
-    },
-    {
-      title: '仮タスク再構築で attendees_user_ids を保持',
-      fn: function() {
-        var items = [
-          [ 'BID', 1, 'schedule', 'G1', 'U1', '案件A', '会議', '田中', '2026-08-01 10:00', 'now', '', JSON.stringify({ endTime:'11:00', location:'会議室', dateConfirmed:true, attendees_user_ids:['U1','U2'] }) ]
-        ];
-        var extracted = rebuildExtractedFromPending(items, '案件A');
-        return extracted.schedules.length === 1 && extracted.schedules[0].attendees_user_ids && extracted.schedules[0].attendees_user_ids.join(',') === 'U1,U2';
-      }
-    }
-  ];
-
-  tests.forEach(function(tc) {
-    console.log((tc.fn() ? '✅' : '❌') + ' ' + tc.title);
-  });
-}
-
-function pmTestAppArchiveFiltering() {
-  if (!pmTestModeEnabled()) {
-    console.log('pmTestAppArchiveFiltering: TEST_MODE=true または TEST_SPREADSHEET_ID が必要です。実行を中止しました。');
-    return;
-  }
-  var uniqueName = 'TEST_ARCHIVE_APP_' + generateId();
-  var pid = null;
-  try {
-    var rec = pmEnsureProjectRecord(uniqueName, { client: 'テスト', assignee: 'tester', updatedBy: 'tester' });
-    pid = rec && rec['案件ID'];
-    if (!pid) { console.log('❌ appアーカイブテスト: 案件作成に失敗しました'); return; }
-
-    pmArchiveProject(pid, 'tester', 'test');
-    var data = appGetData();
-    var billing = appGetBillingData();
-    var foundInData = (data.projects || []).some(function(p) { return String(p.id) === String(pid); });
-    var foundInBilling = (billing.projects || []).some(function(p) { return String(p.id) === String(pid); });
-    console.log((foundInData === false ? '✅' : '❌') + ' appGetData: 取消案件を除外');
-    console.log((foundInBilling === false ? '✅' : '❌') + ' appGetBillingData: 取消案件を除外');
-  } catch (e) {
-    console.log('❌ pmTestAppArchiveFiltering: 例外発生 - ' + e.message);
-  } finally {
-    if (pid) {
-      var deletedProjectRows = pmDeleteRowsWhere(PM_SHEET_PROJECTS, '案件名', uniqueName);
-      var deletedLogRows = pmDeleteRowsWhere(PM_SHEET_LOGS, '案件ID', pid);
-      console.log('削除: projects=' + deletedProjectRows + '行, logs=' + deletedLogRows + '行');
-    }
-  }
+  // 後片付け
+  var deletedProjectRows = pmDeleteRowsWhere(PM_SHEET_PROJECTS, '案件名', uniqueName);
+  var deletedLogRows = pmDeleteRowsWhere(PM_SHEET_LOGS, '案件ID', pid);
+  console.log('削除: projects=' + deletedProjectRows + '行, logs=' + deletedLogRows + '行');
 }
 
 // ==========================================

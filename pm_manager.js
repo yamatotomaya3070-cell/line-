@@ -232,274 +232,30 @@ function pmApplyUpdate(parsed, projectName, sender, groupId, srcMsg) {
 // ---- プロジェクトアーカイブ ----
 function pmArchiveProject(projectId, updatedBy, kind) {
   if (!projectId) return { ok: false, msg: '案件IDが必要です' };
-  var locked = pmWithLock(function() {
-    var sh = getSheet(PM_SHEET_PROJECTS);
-    if (!sh) return { ok: false, msg: 'projectsシートが見つかりません' };
-    var data = sh.getDataRange().getValues();
-    if (!data || !data.length) return { ok: false, msg: 'projectsシートが空です' };
-    var h = data[0].map(function(x) { return String(x).trim(); });
-    var cId = h.indexOf('案件ID');
-    var cDel = h.indexOf('取消');
-    var cUpd = h.indexOf('最終更新日');
-    var cWho = h.indexOf('最終更新者');
-    var cUpdate = h.indexOf('更新日');
-    if (cId === -1) return { ok: false, msg: '案件ID列がありません（setup実行を）' };
-    if (cDel === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][cId] || '').trim() === String(projectId).trim()) {
-        var current = String(data[i][cDel] || '').trim().toUpperCase();
-        if (current === 'TRUE' || current === '1' || current === '✓') {
-          return { ok: true, msg: '既にアーカイブ済みです' };
-        }
-        // mark cancel flag (legacy cell write for compatibility)
-        sh.getRange(i + 1, cDel + 1).setValue('TRUE');
-        if (cUpd !== -1) sh.getRange(i + 1, cUpd + 1).setValue(pmTodayYmd());
-        if (cUpdate !== -1) sh.getRange(i + 1, cUpdate + 1).setValue(pmTodayYmd());
-        if (cWho !== -1 && String(updatedBy || '').trim()) sh.getRange(i + 1, cWho + 1).setValue(String(updatedBy).trim());
-
-        // additional archive metadata (will only write if those headers exist)
-        var archiveFields = {
-          '完了日': pmTodayYmd(),
-          '完了者': String(updatedBy || ''),
-          '施工進捗': '100'
-        };
-        try { pmWriteRowFields(PM_SHEET_PROJECTS, i + 1, archiveFields); } catch (e3) {}
-
-        // log all applied changes
-        var appliedChanges = { '取消': 'TRUE' };
-        try {
-          if (archiveFields['完了日']) appliedChanges['完了日'] = archiveFields['完了日'];
-          if (archiveFields['完了者']) appliedChanges['完了者'] = archiveFields['完了者'];
-          if (archiveFields['施工進捗']) appliedChanges['施工進捗'] = archiveFields['施工進捗'];
-        } catch (e4) {}
-        try { pmAddLog(projectId, 'archive', appliedChanges, '', updatedBy || '', '', kind || 'auto'); } catch (e2) {}
-        return { ok: true };
-      }
-    }
-    return { ok: false, msg: '案件が見つかりません' };
-  }, 30000);
-  if (!locked.ok) return { ok: false, msg: 'アーカイブ処理が混み合っています。再試行してください' };
-  return locked.result;
-}
-
-// ---- アーカイブ解除（案件再開） ----
-function pmUnarchiveProject(projectId, updatedBy, kind) {
-  if (!projectId) return { ok: false, msg: '案件IDが必要です' };
-  var locked = pmWithLock(function() {
-    var sh = getSheet(PM_SHEET_PROJECTS);
-    if (!sh) return { ok: false, msg: 'projectsシートが見つかりません' };
-    var data = sh.getDataRange().getValues();
-    if (!data || !data.length) return { ok: false, msg: 'projectsシートが空です' };
-    var h = data[0].map(function(x) { return String(x).trim(); });
-    var cId = h.indexOf('案件ID');
-    var cDel = h.indexOf('取消');
-    var cUpd = h.indexOf('最終更新日');
-    var cWho = h.indexOf('最終更新者');
-    var cUpdate = h.indexOf('更新日');
-    if (cId === -1) return { ok: false, msg: '案件ID列がありません（setup実行を）' };
-    if (cDel === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][cId] || '').trim() === String(projectId).trim()) {
-        var current = String(data[i][cDel] || '').trim().toUpperCase();
-        if (!(current === 'TRUE' || current === '1' || current === '✓')) {
-          // 二重解除防止：既にアーカイブでない場合は操作失敗扱いにする
-          return { ok: false, msg: 'アーカイブされていません' };
-        }
-        sh.getRange(i + 1, cDel + 1).setValue('');
-        if (cUpd !== -1) sh.getRange(i + 1, cUpd + 1).setValue(pmTodayYmd());
-        if (cUpdate !== -1) sh.getRange(i + 1, cUpdate + 1).setValue(pmTodayYmd());
-        if (cWho !== -1 && String(updatedBy || '').trim()) sh.getRange(i + 1, cWho + 1).setValue(String(updatedBy).trim());
-
-        // clear archive metadata where possible
-        var clearFields = { '完了日': '', '完了者': '' };
-        try { pmWriteRowFields(PM_SHEET_PROJECTS, i + 1, clearFields); } catch (e5) {}
-
-        // NOTE: 施工進捗の単純クリアは行わない（完了前進捗の保存・統一再計算未実装のため）。
-        // TODO: implement recalculation or restore of pre-completion progress on unarchive.
-        try { pmAddLog(projectId, 'unarchive', { '取消': '', '完了日': '', '完了者': '' }, '', updatedBy || '', '', kind || 'auto'); } catch (e6) {}
-        return { ok: true };
-      }
-    }
-    return { ok: false, msg: '案件が見つかりません' };
-  }, 30000);
-  if (!locked.ok) return { ok: false, msg: 'アーカイブ解除が混み合っています。再試行してください' };
-  return locked.result;
-}
-
-// ---- アーカイブ一覧取得 ----
-function pmListArchivedProjects() {
-  var rows = pmReadObjects(PM_SHEET_PROJECTS);
-  return rows.filter(function(r) {
-    var canceled = String(r['取消'] || '').trim().toUpperCase();
-    return (canceled === 'TRUE' || canceled === '1' || canceled === '✓' || canceled === 'YES');
-  });
-}
-
-// ---- 進捗率統一（プロジェクト単位の再計算） ----
-// 設計: 案件の `施工進捗` は店舗単位（PM_SHEET_STORES の '施工進捗'）の平均で算出する。
-// - 存在する店舗の進捗を数値で集計し、平均（四捨五入）を projects シートに書き戻す。
-// - 店舗が無い場合は既存の案件フィールドを変更しない。
-function pmRecalculateProjectProgress(projectId) {
-  if (!projectId) return { ok: false, msg: '案件IDが必要です' };
-  try {
-    var stores = pmReadObjects('stores'); // PM_SHEET_STORES 名は 'stores' または '店舗' 環境に依存
-    var vals = [];
-    stores.forEach(function(s) {
-      if (String(s['案件ID'] || '').trim() === String(projectId).trim()) {
-        var p = Number(s['施工進捗']);
-        if (!isNaN(p)) vals.push(p);
-      }
-    });
-    if (!vals.length) return { ok: false, msg: '対象案件に店舗進捗がありません' };
-    var sum = vals.reduce(function(a, b) { return a + b; }, 0);
-    var avg = Math.round(sum / vals.length);
-    var rec = pmGetProjectById(projectId);
-    if (!rec) return { ok: false, msg: '案件が見つかりません' };
-    pmWriteRowFields(PM_SHEET_PROJECTS, rec._row, { '施工進捗': avg, '最終更新日': pmTodayYmd() });
-    pmAddLog(projectId, 'progress_recalc', { '施工進捗': avg }, '', 'system', '', 'auto');
-    return { ok: true, progress: avg };
-  } catch (e) { return { ok: false, msg: e.message }; }
-}
-
-function pmRecalculateAllProjects() {
-  var rows = pmReadObjects(PM_SHEET_PROJECTS);
-  var results = [];
-  rows.forEach(function(r) {
-    var res = pmRecalculateProjectProgress(r['案件ID']);
-    results.push({ projectId: r['案件ID'], result: res });
-  });
-  return results;
-}
-
-// ---- 複数人タスク：タスク作成・担当更新のユーティリティ ----
-// タスク管理シートのフォーマットに依存（既存は 'タスク管理' を使用）。
-// 既存レコードの担当者列は文字列として複数名をカンマ区切り等で保持する方針。
-function pmCreateTaskMulti(task) {
-  // task: { projectId, projectName, content, assignees: [name,...], deadline }
-  if (!task || !task.content) return { ok: false, msg: 'タスク内容が必要です' };
-  var sheet = getSheet('タスク管理');
-  if (!sheet) return { ok: false, msg: 'タスク管理シートが見つかりません' };
-  var assignees = (task.assignees || []).filter(function(x){return String(x||'').trim();}).map(function(s){return String(s).trim();});
-  var assigneeStr = assignees.join(' / ');
-  var id = generateId();
-  var row = [id, task.projectName || '', task.content, assigneeStr, task.deadline || '', 'confirmed'];
-  sheet.appendRow(row);
-  return { ok: true, taskId: id };
-}
-
-function pmAssignTaskMultiple(taskId, assignees) {
-  if (!taskId) return { ok: false, msg: 'taskIdが必要です' };
-  var sheet = getSheet('タスク管理');
-  if (!sheet) return { ok: false, msg: 'タスク管理シートが見つかりません' };
-  var data = sheet.getDataRange().getValues();
-  var idx = -1;
+  var sh = getSheet(PM_SHEET_PROJECTS);
+  var data = sh.getDataRange().getValues();
+  var h = data[0].map(function(x) { return String(x).trim(); });
+  var cId = h.indexOf('案件ID');
+  var cDel = h.indexOf('取消');
+  var cUpd = h.indexOf('最終更新日');
+  var cWho = h.indexOf('最終更新者');
+  var cUpdate = h.indexOf('更新日');
+  if (cDel === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
   for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0] || '') === String(taskId)) { idx = i + 1; break; }
-  }
-  if (idx === -1) return { ok: false, msg: 'タスクが見つかりません' };
-  var s = (assignees || []).filter(function(x){return String(x||'').trim();}).join(' / ');
-  sheet.getRange(idx, 4).setValue(s); // 担当者は4列目（既存フォーマット依存）
-  return { ok: true };
-}
-
-// ---- LINE 活動履歴（軽量ログ） ----
-// 追加シート: PM_SHEET_LINE_ACTIVITY
-function pmRecordLineActivity(evt) {
-  // evt: { ts, type, userId, displayName, groupId, text, projectId, raw }
-  try {
-    pmAppendRowFields(PM_SHEET_LINE_ACTIVITY, {
-      '日時': fmtDT(new Date(evt.ts || Date.now())),
-      '種別': evt.type || '',
-      'ユーザーID': evt.userId || '',
-      '表示名': evt.displayName || '',
-      'グループID': evt.groupId || '',
-      'メッセージ': evt.text || '',
-      '案件ID': evt.projectId || '',
-      'raw': JSON.stringify(evt.raw || {})
-    });
-    return { ok: true };
-  } catch (e) { return { ok: false, msg: e.message }; }
-}
-
-function pmListLineActivities(projectId, limit) {
-  limit = Number(limit) || 100;
-  var rows = pmReadObjects(PM_SHEET_LINE_ACTIVITY);
-  if (projectId) rows = rows.filter(function(r){ return String(r['案件ID']||'') === String(projectId); });
-  rows.sort(function(a,b){ return new Date(b['日時']).getTime() - new Date(a['日時']).getTime(); });
-  return rows.slice(0, limit);
-}
-
-// ---- Drive アーカイブ dry-run 設計（移動は行わない） ----
-function pmDriveArchiveDryRun(projectId) {
-  // returns a detailed plan of actions that WOULD be taken for Drive archive (dry-run only)
-  var proj = pmGetProjectById(projectId);
-  if (!proj) return { ok: false, msg: '案件が見つかりません' };
-  // collect candidate folders from known fields (no API calls)
-  var candidates = [];
-  if (proj['driveProjectFolderId']) candidates.push({ key: 'driveProjectFolderId', id: proj['driveProjectFolderId'], url: proj['driveProjectFolderUrl'] || '' });
-  if (proj['DriveフォルダID']) candidates.push({ key: 'DriveフォルダID', id: proj['DriveフォルダID'], url: proj['DriveフォルダURL'] || '' });
-
-  // design: move to archive folder structure: /Archive/YYYY/<案件ID>_案件名
-  var year = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy');
-  var destPath = '/Archive/' + year + '/' + projectId + '_' + (proj['案件名'] || '').replace(/\//g, '_');
-
-  var actions = candidates.map(function(c) {
-    return {
-      from: c,
-      to: { path: destPath },
-      note: 'dry-run: no changes made',
-      preState: { fieldKey: c.key, id: c.id, url: c.url }
-    };
-  });
-
-  // prepare rollback design: since we do not perform moves, this is a textual plan
-  var rollbackSteps = actions.map(function(a) {
-    return {
-      action: 'restore',
-      description: 'If an archive move succeeded then failed later, move back from ' + a.to.path + ' to original folder recorded in ' + a.preState.fieldKey,
-      restoreFrom: a.to.path,
-      restoreTo: a.preState.id || ('original path from ' + a.preState.fieldKey),
-      note: 'Requires Drive API + credentials; ensure idempotent checks and retry/backoff.'
-    };
-  });
-
-  var preSnapshot = {
-    projectId: projectId,
-    projectName: proj['案件名'] || '',
-    timestamp: fmtDT(new Date()),
-    projectFields: {
-      driveProjectFolderId: proj['driveProjectFolderId'] || '',
-      driveProjectFolderUrl: proj['driveProjectFolderUrl'] || '',
-      DriveフォルダID: proj['DriveフォルダID'] || '',
-      DriveフォルダURL: proj['DriveフォルダURL'] || ''
+    if (String(data[i][cId] || '').trim() === String(projectId).trim()) {
+      var current = String(data[i][cDel] || '').trim().toUpperCase();
+      if (current === 'TRUE' || current === '1' || current === '✓') {
+        return { ok: true, msg: '既にアーカイブ済みです' };
+      }
+      sh.getRange(i + 1, cDel + 1).setValue('TRUE');
+      if (cUpd !== -1) sh.getRange(i + 1, cUpd + 1).setValue(pmTodayYmd());
+      if (cUpdate !== -1) sh.getRange(i + 1, cUpdate + 1).setValue(pmTodayYmd());
+      if (cWho !== -1 && String(updatedBy || '').trim()) sh.getRange(i + 1, cWho + 1).setValue(String(updatedBy).trim());
+      try { pmAddLog(projectId, 'archive', { '取消': 'TRUE' }, '', updatedBy || '', '', kind || 'auto'); } catch (e2) {}
+      return { ok: true };
     }
-  };
-
-  return {
-    ok: true,
-    projectId: projectId,
-    projectName: proj['案件名'] || '',
-    candidates: candidates,
-    actions: actions,
-    preSnapshot: preSnapshot,
-    rollbackPlan: { summary: 'Move files/folders back to original locations using recorded IDs/paths', steps: rollbackSteps }
-  };
-}
-
-// ---- Drive アーカイブ実行設計（dry-run を基にした実行前チェック用） ----
-function pmDriveArchivePlan(projectId) {
-  // returns a checklist and preconditions required before doing actual moves
-  var dry = pmDriveArchiveDryRun(projectId);
-  if (!dry.ok) return dry;
-  var checks = [];
-  if (!dry.candidates.length) checks.push({ ok: false, msg: '移動対象となる Drive フォルダ ID が見つかりません' });
-  else checks.push({ ok: true, msg: dry.candidates.length + ' 個の候補フォルダを確認' });
-
-  checks.push({ ok: true, msg: 'アーカイブ先パス: ' + (dry.actions && dry.actions[0] && dry.actions[0].to.path || '') });
-  checks.push({ ok: true, msg: '事前スナップショットを取得済み（返却データ参照）' });
-  checks.push({ ok: false, msg: '実行には Drive API 権限と運用承認が必要（dry-run のまま実行はしない）' });
-
-  return { ok: true, projectId: projectId, planChecks: checks, dryRun: dry };
+  }
+  return { ok: false, msg: '案件が見つかりません' };
 }
 
 // ---- 履歴記録 ----

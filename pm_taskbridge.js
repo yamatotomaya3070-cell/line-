@@ -15,10 +15,6 @@ function pmCreateFollowupTask(projectId, projectName, parsed, sender, groupId) {
   var assignee = parsed.assignee || sender || '';
   var due      = parsed.next_action_due_date;
 
-  // follow-up task support: preserve assignee user IDs when present, but do not add columns automatically.
-  // TODO: さらなる multi-user / assignee ID フロー対応は将来の検討。
-  var assigneeIds = Array.isArray(parsed.assignee_user_ids) ? parsed.assignee_user_ids : [];
-
   // 重複検出と追記を同時実行で直列化（並走でも二重作成しない）
   var res = pmWithLock(function() {
     var idx  = pmHeaderIndex(sheet);
@@ -48,7 +44,6 @@ function pmCreateFollowupTask(projectId, projectName, parsed, sender, groupId) {
       '案件名': projectName,
       'タスク内容': content,
       '担当者': assignee,
-      '担当者ID': assigneeIds.length ? assigneeIds.join('、') : '',
       '期日': due,
       'ステータス': 'confirmed',
       '作成日時': fmtDT(new Date()),

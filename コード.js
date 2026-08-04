@@ -326,16 +326,9 @@ function detectTasksSilently(ev, groupId, userId, sender, text, ts) {
 
   // @メンションされた人 → タスク担当者・予定参加者に追加（DM通知・カレンダー反映用）
   var mentionedNames = getMentionedMemberNames(ev);
-  var mentionedIds   = getMentionedMemberIds(ev);
-  if (mentionedNames.length || mentionedIds.length) {
-    extracted.tasks.forEach(function(t) {
-      t.assignee  = mergeNames(t.assignee, mentionedNames);
-      t.assignee_user_ids = mergeUserIds(t.assignee_user_ids, mentionedIds);
-    });
-    extracted.schedules.forEach(function(s) {
-      s.attendees = mergeNames(s.attendees, mentionedNames);
-      s.attendees_user_ids = mergeUserIds(s.attendees_user_ids, mentionedIds);
-    });
+  if (mentionedNames.length) {
+    extracted.tasks.forEach(function(t)     { t.assignee  = mergeNames(t.assignee, mentionedNames); });
+    extracted.schedules.forEach(function(s) { s.attendees = mergeNames(s.attendees, mentionedNames); });
   }
 
   // 保存先プロジェクト：紐付け済み > 高確度の既存案件 > 未分類（誤った新規案件の自動生成は避ける）
@@ -371,29 +364,6 @@ function getMentionedMemberNames(ev) {
     if (name && names.indexOf(name) === -1) names.push(name);
   });
   return names;
-}
-
-function getMentionedMemberIds(ev) {
-  var ids = [];
-  var mention = ev && ev.message && ev.message.mention;
-  if (!mention || !mention.mentionees || !mention.mentionees.length) return ids;
-  var botId = getCachedBotUserId();
-  mention.mentionees.forEach(function(m) {
-    if (m.isSelf === true) return;
-    if (botId && m.userId === botId) return;
-    if (!m.userId) return;
-    if (ids.indexOf(m.userId) === -1) ids.push(m.userId);
-  });
-  return ids;
-}
-
-function mergeUserIds(existing, additions) {
-  if (!Array.isArray(existing)) existing = [];
-  if (!Array.isArray(additions)) additions = [];
-  var seen = {};
-  existing.forEach(function(id) { if (id) seen[id] = true; });
-  additions.forEach(function(id) { if (id && !seen[id]) { seen[id] = true; existing.push(id); } });
-  return existing;
 }
 
 // 既存の担当者/参加者文字列に、追加メンバー名を重複なく結合（「、」区切り）
@@ -926,11 +896,11 @@ function storePending(extracted, projectName, groupId, userId, rawMessage) {
     idx++;
     sheet.appendRow([batchId, idx, 'task', groupId, userId,
       projectName || '', t.taskContent || '', t.assignee || '', t.deadline || '',
-      now, idx === 1 ? rawMessage : '', JSON.stringify({ urgency: t.urgency || '', dateConfirmed: t.dateConfirmed !== false, assignee_user_ids: t.assignee_user_ids || [] })]);
+      now, idx === 1 ? rawMessage : '', JSON.stringify({ urgency: t.urgency || '', dateConfirmed: t.dateConfirmed !== false })]);
   });
   extracted.schedules.forEach(function(s) {
     idx++;
-    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '', dateConfirmed: s.dateConfirmed !== false, attendees_user_ids: s.attendees_user_ids || [] });
+    var extra = JSON.stringify({ endTime: s.endTime || '', location: s.location || '', description: s.description || '', dateConfirmed: s.dateConfirmed !== false });
     sheet.appendRow([batchId, idx, 'schedule', groupId, userId,
       projectName || '', s.title || '', s.attendees || '',
       (s.date || '') + (s.startTime ? ' ' + s.startTime : ''),
@@ -1314,17 +1284,16 @@ function commitDirectly(extracted, projectName, groupId, userId) {
   extracted.tasks.forEach(function(t) {
     if (isDuplicateTask(t.taskContent, t.assignee, groupId)) return;
     var task = {
-      task_id:         generateId(),
-      project_name:    projectName,
-      content:         t.taskContent || '',
-      assignee:        t.assignee    || '',
-      assignee_user_ids: t.assignee_user_ids || [],
-      due_date:        t.deadline    || '',
-      status:          'confirmed',
-      created_at:      fmtDT(new Date()),
-      group_id:        groupId,
-      urgency:         t.urgency     || '',
-      date_confirmed:  t.dateConfirmed !== false,
+      task_id:      generateId(),
+      project_name: projectName,
+      content:      t.taskContent || '',
+      assignee:     t.assignee    || '',
+      due_date:     t.deadline    || '',
+      status:       'confirmed',
+      created_at:   fmtDT(new Date()),
+      group_id:     groupId,
+      urgency:      t.urgency     || '',
+      date_confirmed: t.dateConfirmed !== false,
     };
     writeTask(task);
     notifyAssignee(task);
@@ -1385,10 +1354,10 @@ function rebuildExtractedFromPending(items, projectName) {
   items.forEach(function(row) {
     var extra = safeParseJson(row[11]);
     if (row[2] === 'task') {
-      extracted.tasks.push({ taskContent: row[6], assignee: row[7], deadline: row[8], dateConfirmed: extra.dateConfirmed !== false, assignee_user_ids: extra.assignee_user_ids || [] });
+      extracted.tasks.push({ taskContent: row[6], assignee: row[7], deadline: row[8], dateConfirmed: extra.dateConfirmed !== false });
     } else if (row[2] === 'schedule') {
       var parts = String(row[8]).split(' ');
-      extracted.schedules.push({ title: row[6], date: parts[0] || '', startTime: parts[1] || '', attendees: row[7], dateConfirmed: extra.dateConfirmed !== false, attendees_user_ids: extra.attendees_user_ids || [] });
+      extracted.schedules.push({ title: row[6], date: parts[0] || '', startTime: parts[1] || '', attendees: row[7], dateConfirmed: extra.dateConfirmed !== false });
     }
   });
   return extracted;
@@ -1409,17 +1378,16 @@ function commitPendingItems(items) {
     if (type === 'task') {
       if (isDuplicateTask(content, assignee, groupId)) return;
       var task = {
-        task_id:         generateId(),
-        project_name:    projectName,
-        content:         content,
-        assignee:        assignee,
-        assignee_user_ids: extra.assignee_user_ids || [],
-        due_date:        dateOrDl,
-        status:          'confirmed',
-        created_at:      fmtDT(new Date()),
-        group_id:        groupId,
-        urgency:         extra.urgency || '',
-        date_confirmed:  extra.dateConfirmed !== false,
+        task_id:      generateId(),
+        project_name: projectName,
+        content:      content,
+        assignee:     assignee,
+        due_date:     dateOrDl,
+        status:       'confirmed',
+        created_at:   fmtDT(new Date()),
+        group_id:     groupId,
+        urgency:      extra.urgency || '',
+        date_confirmed: extra.dateConfirmed !== false,
       };
       writeTask(task);
       notifyAssignee(task);
@@ -1475,16 +1443,12 @@ function notifyAssignee(task) {
     '\n内容：' + task.content +
     '\n期日：' + dueLabel +
     '\n\nご確認のほどよろしくお願いいたします。';
-  if (task.assignee_user_ids && task.assignee_user_ids.length) {
-    notifyMembersByUserIds(task.assignee_user_ids, msg);
-  } else {
-    notifyMembersByNames(task.assignee, msg);
-  }
+  notifyMembersByNames(task.assignee, msg);
 }
 
 // 予定の参加者全員に予定内容をDM通知（カレンダー招待と併せて予定を反映）
 function notifySchedulePeople(schedule, meetLink) {
-  if (!schedule || (!schedule.attendees && !(schedule.attendees_user_ids && schedule.attendees_user_ids.length))) return;
+  if (!schedule || !schedule.attendees) return;
   var isTentative = schedule.date_confirmed === false;
   var msg = '【予定のご連絡】\n案件：' + (schedule.project_name || '未分類') +
     '\n予定：' + schedule.title +
@@ -1494,21 +1458,7 @@ function notifySchedulePeople(schedule, meetLink) {
     (isTentative
       ? '\n\n※日程が未確定のためカレンダーには登録していません。確定後に改めてご連絡ください。'
       : '\n\nカレンダーに登録しました。ご確認のほどよろしくお願いいたします。');
-  if (schedule.attendees_user_ids && schedule.attendees_user_ids.length) {
-    notifyMembersByUserIds(schedule.attendees_user_ids, msg);
-  } else {
-    notifyMembersByNames(schedule.attendees, msg);
-  }
-}
-
-// 名前リスト（userId配列）を分解し、各メンバーのDMへ通知（同一userIdへの重複送信は防止）
-function notifyMembersByUserIds(userIds, message) {
-  var seen = {};
-  (Array.isArray(userIds) ? userIds : []).forEach(function(uid) {
-    if (!uid || seen[uid]) return;
-    seen[uid] = true;
-    sendLineMessage(uid, message);
-  });
+  notifyMembersByNames(schedule.attendees, msg);
 }
 
 // 名前文字列（複数名可）を分解し、各メンバーのDMへ通知（同一userIdへの重複送信は防止）
@@ -1688,58 +1638,14 @@ function reprocessMessage(text, oldBatchId, groupId, userId, sender, ts, replyTo
 
 // タスク管理シート列: task_id|案件名|タスク内容|担当者|期日|ステータス|作成日時|グループID|緊急度
 function writeTask(task) {
-  var sheet = getSheet('タスク管理');
-  if (!sheet) return;
-
-  var res = pmWithLock(function() {
-    // Legacy 9-column append: do not auto-migrate sheet schema during normal task registration.
-    sheet.appendRow([
-      task.task_id || '', task.project_name || '', task.content || '', task.assignee || '',
-      task.due_date || '', task.status || 'confirmed', task.created_at || '', task.group_id || '',
-      task.urgency || '',
-    ]);
-
-    var rowNumber = sheet.getLastRow();
-    var idx = pmHeaderIndex(sheet);
-    try {
-      if (idx['担当者ID'] !== undefined) {
-        sheet.getRange(rowNumber, idx['担当者ID'] + 1)
-          .setValue(Array.isArray(task.assignee_user_ids) ? task.assignee_user_ids.join('、') : '');
-      }
-      if (idx['関連案件ID'] !== undefined) {
-        sheet.getRange(rowNumber, idx['関連案件ID'] + 1)
-          .setValue(task.related_project_id || '');
-      }
-      if (idx['作成元'] !== undefined) {
-        sheet.getRange(rowNumber, idx['作成元'] + 1)
-          .setValue(task.source || '');
-      }
-    } catch (e) {
-      console.warn('writeTask: 拡張列追記に失敗しました。row=' + rowNumber + ', task_id=' + (task.task_id || '') + ', error=' + e.message);
-      // 既存9列タスク登録を維持するため、拡張列追記失敗時は例外を再スローしません。
-    }
-  });
-
-  if (!res || res.ok === false) {
-    console.error('writeTask: ロック取得/実行に失敗しました。', res && res.error);
-    return;
-  }
-
-  if (task.project_name && task.project_name !== '未分類') {
-    try {
-      registerNewProject(task.project_name, task.group_id);
-    } catch (e) {
-      console.error('writeTask: registerNewProject failed', { task_id: task.task_id || '', action: 'registerNewProject', error: e.message });
-    }
-  }
+  getSheet('タスク管理').appendRow([
+    task.task_id || '', task.project_name || '', task.content || '', task.assignee || '',
+    task.due_date || '', task.status || 'confirmed', task.created_at || '', task.group_id || '',
+    task.urgency || '',
+  ]);
+  if (task.project_name && task.project_name !== '未分類') registerNewProject(task.project_name, task.group_id);
   // 期日未確定（date_confirmed === false）のタスクはカレンダー登録しない（DM通知のみ）
-  if (task.date_confirmed !== false) {
-    try {
-      addTaskToCalendar(task);
-    } catch (e) {
-      console.error('writeTask: addTaskToCalendar failed', { task_id: task.task_id || '', action: 'addTaskToCalendar', error: e.message });
-    }
-  }
+  if (task.date_confirmed !== false) addTaskToCalendar(task);
 }
 
 // スケジュール管理シート列: 登録日時|案件名|予定タイトル|日付|開始時間|終了時間|場所|参加者|詳細|グループID
@@ -3367,12 +3273,12 @@ function shouldSkipExtraction(text) {
 function isDuplicateTask(content, assignee, groupId) {
   var sheet = getSheet('タスク管理');
   if (!sheet || sheet.getLastRow() <= 1) return false;
-  var data    = sheet.getDataRange().getValues();
-  var cutoff  = Date.now() - 48 * 60 * 60 * 1000;
-  var normNew = String(content || '').replace(/\s/g, '').slice(0, 30);
-
+  var data     = sheet.getDataRange().getValues();
+  var cutoff   = Date.now() - 48 * 60 * 60 * 1000;
+  var normNew  = content.replace(/\s/g, '').slice(0, 30);
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
+    // 列: [0]=task_id, [1]=案件名, [2]=内容, [3]=担当者, [4]=期日, [5]=ステータス, [6]=作成日時, [7]=group_id
     if (row[7] !== groupId) continue;
     var createdAt = new Date(row[6]);
     if (isNaN(createdAt) || createdAt.getTime() < cutoff) continue;

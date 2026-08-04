@@ -346,14 +346,7 @@ function appCreateDriveFolder(projectId, who) {
 
 // 取り消し（物理削除でなくアーカイブ）
 function appArchiveProject(projectId, who) {
-  if (!projectId) return { ok: false, msg: '案件IDが必要です' };
-  var sh = getSheet(PM_SHEET_PROJECTS);
-  if (!sh) return { ok: false, msg: 'projectsシートが見つかりません' };
-  var data = sh.getDataRange().getValues();
-  if (!data || !data.length) return { ok: false, msg: 'projectsシートが空です' };
-  var h = data[0].map(function(x) { return String(x).trim(); });
-  if (h.indexOf('案件ID') === -1) return { ok: false, msg: '案件ID列がありません（setup実行を）' };
-  if (h.indexOf('取消') === -1) return { ok: false, msg: '取消列がありません（setup実行を）' };
+  if (!projectId) return { ok: false };
   return pmArchiveProject(projectId, appActor_(who), 'auto');
 }
 

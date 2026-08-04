@@ -76,7 +76,6 @@
   <span class="sp"></span>
   <a class="btn" href="<?= tasksUrl ?>" target="_top">📋 タスク</a>
   <a class="btn" href="<?= billingUrl ?>" target="_top">🧾 請求・入金</a>
-  <button class="btn" id="openArchive">🗄 アーカイブ</button>
   <button class="btn" id="whoBtn" title="更新者として記録される名前（クリックで変更）">👤 名前を設定</button>
   <button class="btn" id="reload">↻ 更新</button>
   <button class="btn primary" id="add">＋ 案件追加</button>
@@ -95,16 +94,6 @@
     <div class="row">
       <button class="btn" id="cancel">キャンセル</button>
       <button class="btn primary" id="save">追加する</button>
-    </div>
-  </div>
-</div>
-
-<div class="mask" id="maskArchive">
-  <div class="modal" style="max-width:760px;">
-    <h3>アーカイブ済み案件一覧</h3>
-    <div id="archiveList" style="max-height:60vh;overflow:auto;padding:6px 0 0 0"></div>
-    <div style="margin-top:12px;text-align:right">
-      <button class="btn" id="closeArchive">閉じる</button>
     </div>
   </div>
 </div>
@@ -348,71 +337,6 @@
   });
 
   load();
-
-  // ---- Archive modal ----
-  document.getElementById('openArchive').addEventListener('click', function(){
-    document.getElementById('maskArchive').classList.add('on');
-    loadArchiveList();
-  });
-  document.getElementById('closeArchive').addEventListener('click', function(){ document.getElementById('maskArchive').classList.remove('on'); });
-
-  function loadArchiveList(){
-    var container = document.getElementById('archiveList');
-    container.innerHTML = '<div class="state">読み込み中…</div>';
-    google.script.run.withSuccessHandler(function(rows){
-      try{ renderArchiveList(rows||[]); }catch(e){ container.innerHTML='<div class="state">表示エラー:'+esc(e.message)+'</div>'; }
-    }).withFailureHandler(function(e){ container.innerHTML = '<div class="state">読み込み失敗:'+esc(e&&e.message?e.message:e)+'</div>'; }).pmListArchivedProjects();
-  }
-
-  function renderArchiveList(rows){
-    var container = document.getElementById('archiveList');
-    if(!rows || !rows.length){ container.innerHTML = '<div class="empty">アーカイブ済み案件はありません</div>'; return; }
-    var html = '<table style="width:100%;border-collapse:collapse">';
-    html += '<tr><th style="text-align:left;padding:8px;border-bottom:1px solid var(--line)">案件ID</th><th style="text-align:left;padding:8px;border-bottom:1px solid var(--line)">案件名</th><th style="text-align:left;padding:8px;border-bottom:1px solid var(--line)">完了日</th><th style="text-align:left;padding:8px;border-bottom:1px solid var(--line)">完了者</th><th style="text-align:right;padding:8px;border-bottom:1px solid var(--line)">操作</th></tr>';
-    rows.forEach(function(r){
-      var id = esc(r['案件ID']||'');
-      var name = esc(r['案件名']||'');
-      var done = esc(r['完了日']||'');
-      var who = esc(r['完了者']||'');
-      html += '<tr id="arch_'+id+'">'
-        + '<td style="padding:8px;border-bottom:1px solid var(--line)">'+id+'</td>'
-        + '<td style="padding:8px;border-bottom:1px solid var(--line)">'+name+'</td>'
-        + '<td style="padding:8px;border-bottom:1px solid var(--line)">'+done+'</td>'
-        + '<td style="padding:8px;border-bottom:1px solid var(--line)">'+who+'</td>'
-        + '<td style="padding:8px;border-bottom:1px solid var(--line);text-align:right">'
-        + '<button class="btn" data-act="unarchive" data-id="'+id+'">解除</button>'
-        + ' <button class="btn" data-act="drive" data-id="'+id+'">Drive設計</button>'
-        + '</td></tr>';
-    });
-    html += '</table>';
-    container.innerHTML = html;
-  }
-
-  // イベント委譲：アーカイブ一覧内の操作
-  document.getElementById('archiveList').addEventListener('click', function(e){
-    var el = e.target;
-    if(!el.dataset || !el.dataset.act) return;
-    var act = el.dataset.act, id = el.dataset.id;
-    if(act==='unarchive'){
-      if(!confirm('アーカイブを解除します。よろしいですか？\n（完了前進捗の自動復元は未実装です）')) return;
-      if(el.disabled) return; el.disabled=true; el.textContent='処理中…';
-      google.script.run.withSuccessHandler(function(r){
-        if(r.ok){ toast('アーカイブ解除しました'); document.getElementById('maskArchive').classList.remove('on'); load(); }
-        else { toast(r.msg||'解除に失敗しました'); el.disabled=false; el.textContent='解除'; }
-      }).withFailureHandler(function(e){ toast('解除に失敗しました'); el.disabled=false; el.textContent='解除'; }).pmUnarchiveProject(id, whoName(), 'ui');
-    }
-    if(act==='drive'){
-      // show dry-run design for Drive
-      google.script.run.withSuccessHandler(function(r){
-        if(r && r.ok){
-          var lines = ['Drive dry-run：\n'];
-          if(r.actions && r.actions.length){ r.actions.forEach(function(a){ lines.push('From: '+(a.from.id||a.from.url||'N/A')+' → To: '+a.to.path); }); }
-          lines.push('\nロールバック案＆事前スナップショットを確認してください。');
-          alert(lines.join('\n'));
-        } else { alert('Drive dry-run を取得できません: '+(r&&r.msg||'')); }
-      }).withFailureHandler(function(e){ alert('Drive dry-run エラー'); }).pmDriveArchiveDryRun(id);
-    }
-  });
 </script>
 </body>
 </html>
